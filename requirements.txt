@@ -1,0 +1,25 @@
+# GhostScripter-K1-K2 Requirements
+# GPL-3.0 License
+
+# GUI Framework
+PyQt5>=5.15.0
+PyQtWebEngine>=5.15.0
+
+# Database
+SQLAlchemy>=2.0.0
+
+# Configuration
+PyYAML>=6.0
+jsonschema>=4.0.0
+
+# IPC/REST
+requests>=2.28.0
+flask>=2.3.0
+
+# Utilities
+colorama>=0.4.6
+python-dotenv>=1.0.0
+
+# Development
+pytest>=7.0.0
+pytest-cov>=4.0.0
