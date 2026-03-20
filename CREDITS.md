@@ -1,7 +1,8 @@
 # GhostScripter-K1-K2 Credits
 
-## Core Development
-- GhostScripter Development Team — Lead Developer
+## Development
+
+Personal project by a KotOR modder — built out of frustration at context-switching between a dozen separate tools while working on mods.
 
 ---
 

@@ -1,8 +1,10 @@
 """
 GhostScripter-K1-K2 — Quest Model
 """
+from __future__ import annotations
+
 from dataclasses import dataclass, field
-from typing import List, Optional, Any
+from typing import List, Any
 
 
 @dataclass
@@ -22,8 +24,8 @@ class QuestState:
     state_id: int
     state_name: str
     description: str = ""
-    entry_dialogue: Optional[str] = None
-    entry_script: Optional[str] = None
+    entry_dialogue: str | None = None
+    entry_script: str | None = None
     spawned_npcs: List[str] = field(default_factory=list)
     spawned_placeables: List[str] = field(default_factory=list)
     available_objectives: List[str] = field(default_factory=list)
@@ -34,7 +36,7 @@ class QuestTrigger:
     trigger_type: str           # dialogue_choice | item_acquired | npc_death | etc
     condition: str = ""
     target_state: int = 0
-    action_script: Optional[str] = None
+    action_script: str | None = None
 
 
 @dataclass

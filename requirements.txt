@@ -2,7 +2,10 @@
 # GPL-3.0 License
 
 # GUI Framework
-PyQt5>=5.15.0
+# qtpy provides a backend-agnostic Qt abstraction layer (PyQt5 / PyQt6 / PySide6)
+# Install your preferred backend separately; PyQt5 is the current default.
+qtpy>=2.4.3
+PyQt5>=5.15.0         # default backend — swap for PyQt6>=6.4 or PySide6>=6.4 freely
 PyQtWebEngine>=5.15.0
 
 # Database
@@ -19,6 +22,17 @@ flask>=2.3.0
 # Utilities
 colorama>=0.4.6
 python-dotenv>=1.0.0
+
+# ── KotOR I/O library ────────────────────────────────────────────────────────
+# PyKotor is the canonical KotOR binary-format library (OldRepublicDevs/PyKotor).
+# Required for: compileScript, decompileScript, writePTH (real GFF binary output),
+# and opportunistic readIFO/readNCS delegation.
+#
+# Install from PyPI (recommended):
+#   pip install pykotor
+# Or from the PyKotor monorepo (picks up latest fixes):
+#   pip install -e Libraries/PyKotor
+pykotor>=2.3.0
 
 # Development
 pytest>=7.0.0

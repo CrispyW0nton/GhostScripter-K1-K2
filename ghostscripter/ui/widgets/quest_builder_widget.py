@@ -1,11 +1,13 @@
 """
 GhostScripter-K1-K2 — Quest Builder Widget
 """
-from typing import Optional
+from __future__ import annotations
 
-from PyQt5.QtCore import Qt
-from PyQt5.QtGui import QColor, QFont
-from PyQt5.QtWidgets import (
+
+
+from qtpy.QtCore import Qt
+from qtpy.QtGui import QColor, QFont
+from qtpy.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QSplitter, QLabel,
     QPushButton, QTreeWidget, QTreeWidgetItem, QTextEdit,
     QListWidget, QListWidgetItem, QGroupBox, QFormLayout,
@@ -27,7 +29,7 @@ from ghostscripter.core.constants import VAR_TYPES, QUEST_TYPES
 
 class QuestBuilderWidget(QWidget):
 
-    def __init__(self, quest: Optional[QuestDefinition] = None,
+    def __init__(self, quest: QuestDefinition | None = None,
                  project=None, parent=None):
         super().__init__(parent)
         self.quest = quest
@@ -350,7 +352,7 @@ class QuestBuilderWidget(QWidget):
     def _new_quest(self):
         from ghostscripter.ui.dialogs.new_quest_dialog import NewQuestDialog
         dlg = NewQuestDialog(self)
-        if dlg.exec_():
+        if dlg.exec():
             data = dlg.get_data()
             quest = create_quest_from_template(
                 data["template"], data["name"], data.get("game", "K1")
@@ -443,6 +445,6 @@ class QuestBuilderWidget(QWidget):
             QMessageBox.information(self, "✓ Valid", "Quest structure is valid!")
 
     def _copy_globalcat(self):
-        from PyQt5.QtWidgets import QApplication
+        from qtpy.QtWidgets import QApplication
         QApplication.clipboard().setText(self.globalcat_preview.toPlainText())
         QMessageBox.information(self, "Copied", "globalcat.2da entries copied to clipboard.")
