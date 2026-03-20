@@ -2,12 +2,14 @@
 GhostScripter-K1-K2 — Core Data Models
 project.py: ModProject definition
 """
+from __future__ import annotations
+
 import json
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Dict, Optional, Any
+from typing import List, Dict, Any
 
 
 @dataclass
@@ -21,7 +23,7 @@ class ModDependency:
 class ModelReference:
     name: str
     file_path: Path
-    mdx_path: Optional[Path] = None
+    mdx_path: Path | None = None
     texture_paths: List[Path] = field(default_factory=list)
     appearance_2da_id: int = -1
 
@@ -47,16 +49,16 @@ class ModProject:
     modified_date: datetime = field(default_factory=datetime.now)
 
     # Folder structure
-    root_dir: Optional[Path] = None
-    script_dir: Optional[Path] = None
-    dialogue_dir: Optional[Path] = None
-    quest_dir: Optional[Path] = None
-    module_dir: Optional[Path] = None
-    twoda_dir: Optional[Path] = None
-    texture_dir: Optional[Path] = None
-    model_dir: Optional[Path] = None
-    template_dir: Optional[Path] = None
-    export_dir: Optional[Path] = None
+    root_dir: Path | None = None
+    script_dir: Path | None = None
+    dialogue_dir: Path | None = None
+    quest_dir: Path | None = None
+    module_dir: Path | None = None
+    twoda_dir: Path | None = None
+    texture_dir: Path | None = None
+    model_dir: Path | None = None
+    template_dir: Path | None = None
+    export_dir: Path | None = None
 
     # Project state (lazy lists)
     quests: List[Any] = field(default_factory=list)

@@ -1,21 +1,64 @@
+# ── Python ────────────────────────────────────────────────────────
 __pycache__/
 *.py[cod]
+*.pyo
 *.so
 *.egg
 *.egg-info/
-dist/
-build/
 .eggs/
-*.spec
 .env
 .venv
 venv/
+env/
+
+# ── Build & distribution artifacts ────────────────────────────────
+dist/
+build/
+*.spec.bak
+GhostScripter-K1-K2.spec
+
+# ── Databases & logs ──────────────────────────────────────────────
 *.db
 *.sqlite3
 *.log
+
+# ── OS / editor noise ─────────────────────────────────────────────
 .DS_Store
 Thumbs.db
-screenshot.png
+*.swp
+*.swo
+*~
+
+# ── GhostScripter temp files ──────────────────────────────────────
 .temp_ghostrigger.json
 .ghostrigger_temp.json
-*.pyc
+
+# ── Screenshots & sandbox dev scripts ─────────────────────────────
+screenshot.png
+screenshots/
+take_screenshot.py
+server.py
+make_portfolio_shots.py
+make_portfolio_v2.py
+portfolio_shots/
+tmp_screenshots/
+ghostscripter_portfolio_screenshots.tar.gz
+
+# ── Large local data (game files, extracted binaries) ─────────────
+# These are copyrighted game assets and must NOT be committed.
+game_files/
+reference_tools/
+/core
+
+# ── Developer-only files (never commit to public repo) ────────────
+README_DEV_KEYS.md
+keys_*.txt
+*.key.bak
+
+# ── GhostRigger companion tool (separate repo) ────────────────────
+ghostrigger/
+
+# GitHub Actions workflows are tracked (see .github/workflows/)
+
+# ── pytest cache ──────────────────────────────────────────────────
+.pytest_cache/

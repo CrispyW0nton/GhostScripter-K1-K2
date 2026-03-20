@@ -1,11 +1,13 @@
 """
 GhostScripter-K1-K2 — Script Model
 """
+from __future__ import annotations
+
 import re
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional
+from typing import List
 
 
 @dataclass
@@ -24,9 +26,9 @@ class ScriptFile:
     """Represents an NSS script file."""
 
     name: str = ""
-    file_path: Optional[Path] = None
+    file_path: Path | None = None
     source_code: str = ""
-    compiled_code: Optional[bytes] = None
+    compiled_code: bytes | None = None
     errors: List[CompilationError] = field(default_factory=list)
     warnings: List[str] = field(default_factory=list)
 
@@ -39,14 +41,14 @@ class ScriptFile:
 
     # Project context
     script_type: str = "quest"  # quest | dialogue | event | npc
-    associated_quest: Optional[str] = None
+    associated_quest: str | None = None
 
     # ──────────────────────────────────────────────────────────
 
-    def get_file_path(self) -> Optional[Path]:
+    def get_file_path(self) -> Path | None:
         return self.file_path
 
-    def get_compiled_path(self) -> Optional[Path]:
+    def get_compiled_path(self) -> Path | None:
         if self.file_path:
             return self.file_path.with_suffix(".ncs")
         return None

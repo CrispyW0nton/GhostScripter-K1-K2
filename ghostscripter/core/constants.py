@@ -5,8 +5,8 @@ Core constants used throughout the application.
 
 # Application Info
 APP_NAME = "GhostScripter-K1-K2"
-APP_VERSION = "1.0.0"
-APP_DESCRIPTION = "All-in-one IDE for KotOR 1 & 2 TSL modding"
+APP_VERSION = "3.6.0"
+APP_DESCRIPTION = "KotOR Script + Logic IDE"
 
 # Game Targets
 GAME_K1 = "K1"
@@ -67,8 +67,13 @@ RESTYPE_MAP = {
     ".utc": "UTC",
 }
 
-# IPC Config
-IPC_DEFAULT_PORT = 5000
+# IPC Config — GhostWorks pipeline ports (canonical source: ghostscripter.ipc.ports)
+from ghostscripter.ipc.ports import (   # noqa: E402
+    GHOSTRIGGER_REST_LEGACY as IPC_PORT_GHOSTRIGGER,
+    GHOSTSCRIPTER_REST as IPC_PORT_GHOSTSCRIPTER,
+    GMODULAR_REST as IPC_PORT_GMODULAR,
+)
+IPC_DEFAULT_PORT = IPC_PORT_GHOSTSCRIPTER
 IPC_HOST = "localhost"
 
 # Colors (matching KotorModTools dark theme)

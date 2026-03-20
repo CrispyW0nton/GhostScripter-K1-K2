@@ -1,0 +1,238 @@
+name: Build GhostScripter-K1-K2
+
+on:
+  push:
+    branches:
+      - main
+      - dev
+    tags:
+      - "v*.*.*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      create_release:
+        description: "Create GitHub release after build?"
+        type: boolean
+        default: false
+
+# ── Global defaults ───────────────────────────────────────────────────────────
+env:
+  PYTHON_VERSION: "3.11"
+  APP_NAME: "GhostScripter-K1-K2"
+
+jobs:
+  # ── Tests ──────────────────────────────────────────────────────────────────
+  test:
+    name: Run tests (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Install test extras
+        run: pip install pytest pytest-cov
+
+      # On Linux we need a virtual display for PyQt5
+      - name: Install virtual display (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y xvfb libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 libxkbcommon-x11-0
+
+      - name: Run tests (Linux)
+        if: runner.os == 'Linux'
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: pytest tests/ -v --tb=short
+
+      - name: Run tests (Windows)
+        if: runner.os == 'Windows'
+        run: pytest tests/ -v --tb=short
+
+  # ── Build Windows EXE ─────────────────────────────────────────────────────
+  build-windows:
+    name: Build Windows EXE
+    runs-on: windows-latest
+    needs: test
+    # Build on push to main, on version tags, or on manual dispatch
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Generate application icon
+        run: python build_tools/gen_icon.py
+        continue-on-error: true   # non-fatal if Pillow unavailable
+
+      - name: Generate Windows VERSIONINFO
+        run: python build_tools/version_info.py
+
+      - name: Build EXE (folder mode)
+        run: python build_tools/build.py --no-zip
+
+      - name: Build EXE (single-file)
+        run: python build_tools/build.py --onefile --no-zip
+        continue-on-error: true   # single-file is best-effort
+
+      - name: Package artefacts into ZIP
+        shell: pwsh
+        run: |
+          $version = (python -c "from ghostscripter.core.constants import APP_VERSION; print(APP_VERSION)")
+          $zipName = "${{ env.APP_NAME }}-v$version-windows-portable.zip"
+          Compress-Archive -Path "dist\GhostScripter-K1-K2\*" -DestinationPath "dist\$zipName"
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+          echo "APP_VERSION=$version" >> $env:GITHUB_ENV
+
+      - name: Build Inno Setup installer
+        uses: Minionguyjpro/Inno-Setup-Action@v1.2.2
+        with:
+          path: build_tools/make_installer.iss
+          options: /O+
+        continue-on-error: true   # installer is best-effort (ISS tool may not exist)
+
+      - name: Upload portable ZIP
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-portable-zip
+          path: dist/${{ env.ZIP_NAME }}
+          if-no-files-found: warn
+
+      - name: Upload folder artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-folder
+          path: dist/GhostScripter-K1-K2/
+          if-no-files-found: error
+
+      - name: Upload installer (if built)
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/installer/*.exe
+          if-no-files-found: ignore
+
+  # ── Build Linux binary ────────────────────────────────────────────────────
+  build-linux:
+    name: Build Linux binary
+    runs-on: ubuntu-latest
+    needs: test
+    if: |
+      github.event_name == 'workflow_dispatch' ||
+      github.ref == 'refs/heads/main' ||
+      startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+          cache: pip
+
+      - name: Install system packages
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y \
+            libxcb-xinerama0 libxcb-icccm4 libxcb-image0 \
+            libxcb-keysyms1 libxcb-randr0 libxcb-render-util0 \
+            libxkbcommon-x11-0 libgl1-mesa-glx
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller pillow
+
+      - name: Generate icon
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python build_tools/gen_icon.py
+        continue-on-error: true
+
+      - name: Build binary
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python build_tools/build.py
+
+      - name: Get version
+        id: get_version
+        run: |
+          VER=$(python -c "from ghostscripter.core.constants import APP_VERSION; print(APP_VERSION)")
+          echo "version=$VER" >> $GITHUB_OUTPUT
+
+      - name: Upload Linux artefact
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-zip
+          path: dist/${{ env.APP_NAME }}-v${{ steps.get_version.outputs.version }}-linux.zip
+          if-no-files-found: warn
+
+  # ── GitHub Release (on version tags only) ─────────────────────────────────
+  release:
+    name: Create GitHub Release
+    runs-on: ubuntu-latest
+    needs: [build-windows, build-linux]
+    if: startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      contents: write
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install app (for create_release.py)
+        run: pip install -r requirements.txt
+
+      - name: Download all build artefacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist/
+
+      - name: Flatten artefact directories
+        run: |
+          find dist -name "*.zip" -exec mv {} dist/ \;
+          find dist -name "*-Setup.exe" -exec mkdir -p dist/installer && mv {} dist/installer/ \;
+        continue-on-error: true
+
+      - name: Create Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python build_tools/create_release.py --tag ${{ github.ref_name }}
