@@ -190,10 +190,12 @@ class TestOrientationRoundtrip(unittest.TestCase):
         data = w.build()
         # Get field_data offset from header
         fdata_off = _struct.unpack_from("<I", data, 32)[0]
-        # First 16 bytes of field_data should be 4 floats
+        # First 16 bytes of field_data should be 4 floats in X,Y,Z,W disk
+        # order (PyKotor/HolocronToolset convention); add_orientation takes
+        # (w, x, y, z), so w=1.0 lands in the last slot.
         floats = _struct.unpack_from("<ffff", data, fdata_off)
-        self.assertAlmostEqual(floats[0], 1.0, places=4)
-        self.assertAlmostEqual(floats[1], 0.0, places=4)
+        self.assertAlmostEqual(floats[3], 1.0, places=4)
+        self.assertAlmostEqual(floats[0], 0.0, places=4)
 
 
 # ── Combined Vector + Orientation Tests ───────────────────────────────────────

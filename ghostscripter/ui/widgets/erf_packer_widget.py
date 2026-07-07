@@ -132,34 +132,48 @@ class _GameResourcePickerDialog(QDialog):
 
 # ── Known resource types ──────────────────────────────────────
 
+# Type IDs come from the verified shared table in erf_writer.py
+# (cross-checked against PyKotor and retail module RIMs); only the
+# human-readable descriptions live here.
+from ghostscripter.core.export.erf_writer import RESTYPE_IDS as _RESTYPE_IDS
+
+_RESTYPE_DESC = {
+    ".ncs": "NCS - Compiled Script",
+    ".nss": "NSS - Script Source",
+    ".dlg": "DLG - Dialogue",
+    ".utc": "UTC - Creature Blueprint",
+    ".utp": "UTP - Placeable Blueprint",
+    ".uti": "UTI - Item Blueprint",
+    ".utm": "UTM - Merchant Blueprint",
+    ".uts": "UTS - Sound Blueprint",
+    ".utt": "UTT - Trigger Blueprint",
+    ".utw": "UTW - Waypoint Blueprint",
+    ".ute": "UTE - Encounter Blueprint",
+    ".utd": "UTD - Door Blueprint",
+    ".jrl": "JRL - Journal",
+    ".ssf": "SSF - Sound Set",
+    ".fac": "FAC - Faction",
+    ".2da": "2DA - Table",
+    ".mdl": "MDL - Model",
+    ".mdx": "MDX - Model Extension",
+    ".tpc": "TPC - Texture",
+    ".tga": "TGA - Texture",
+    ".wav": "WAV - Audio",
+    ".are": "ARE - Area Template",
+    ".ifo": "IFO - Module Info",
+    ".git": "GIT - Dynamic Area Info",
+    ".lyt": "LYT - Layout",
+    ".vis": "VIS - Visibility",
+    ".pth": "PTH - Pathfinding",
+    ".lip": "LIP - Lipsync",
+    ".txi": "TXI - Texture Info",
+    ".tlk": "TLK - Talk Table",
+}
+
 RESTYPE_MAP = {
-    ".ncs": (2010, "NCS - Compiled Script"),
-    ".nss": (2009, "NSS - Script Source"),
-    ".dlg": (2029, "DLG - Dialogue"),
-    ".utc": (2023, "UTC - Creature Blueprint"),
-    ".utp": (2025, "UTP - Placeable Blueprint"),
-    ".uti": (2024, "UTI - Item Blueprint"),
-    ".utm": (2026, "UTM - Merchant Blueprint"),
-    ".uts": (2027, "UTS - Sound Blueprint"),
-    ".utt": (2023, "UTT - Trigger Blueprint"),
-    ".utw": (2034, "UTW - Waypoint Blueprint"),
-    ".ute": (2022, "UTE - Encounter Blueprint"),
-    ".2da": (2017, "2DA - Table"),
-    ".mdl": (2002, "MDL - Model"),
-    ".mdx": (3002, "MDX - Model Extension"),
-    ".tpc": (3007, "TPC - Texture"),
-    ".tga": (3001, "TGA - Texture"),
-    ".wav": (3004, "WAV - Audio"),
-    ".mp3": (3007, "MP3 - Audio"),
-    ".are": (2012, "ARE - Area Template"),
-    ".ifo": (2014, "IFO - Module Info"),
-    ".git": (2023, "GIT - Dynamic Area Info"),
-    ".lyt": (3005, "LYT - Layout"),
-    ".vis": (3006, "VIS - Visibility"),
-    ".pth": (2036, "PTH - Pathfinding"),
-    ".lip": (4014, "LIP - Lipsync"),
-    ".txi": (3002, "TXI - Texture Info"),
-    ".tlk": (2018, "TLK - Talk Table"),
+    ext: (_RESTYPE_IDS[ext], desc)
+    for ext, desc in _RESTYPE_DESC.items()
+    if ext in _RESTYPE_IDS
 }
 
 

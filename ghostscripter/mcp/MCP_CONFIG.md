@@ -12,7 +12,7 @@ VS Code Copilot, etc.) via the Model Context Protocol.
 3. [Quick Start — HTTP (Cursor / VS Code)](#quick-start--http-cursor--vs-code--web-agents)
 4. [Quick Start — SSE (Legacy Clients)](#quick-start--sse-legacy-mcp-clients)
 5. [Environment Variables](#environment-variables)
-6. [Available Tools (27 total)](#available-tools-27-total)
+6. [Available Tools (60 total)](#available-tools-60-total)
 7. [AgentDecompile Integration](#agentdecompile-integration--binary-analysis)
 8. [Combined Multi-Server Config](#combined-multi-server-config)
 9. [Example Workflow](#example-workflow)
@@ -108,7 +108,10 @@ Connect via `http://localhost:6400/mcp`.
 
 ---
 
-## Available Tools (27 total)
+## Available Tools (60 total)
+
+> The list below covers the core tools; see the README's
+> [All 60 Tools](../../README.md#all-60-tools) table for the complete set.
 
 ### Installation & Discovery
 | Tool | Description |

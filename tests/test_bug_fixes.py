@@ -283,21 +283,22 @@ class TestBug4ERFRestypeMap(unittest.TestCase):
         """Bug was: .utt was mapped to 2023 (wrong, colliding with .git)."""
         self.assertEqual(self._get_rtype("test.utt"), 2032)
 
-    def test_jrl_type_is_2057(self):
-        """Bug was: .jrl was missing from the map entirely."""
-        self.assertEqual(self._get_rtype("test.jrl"), 2057)
+    def test_jrl_type_is_2056(self):
+        """.jrl is 2056 — verified against PyKotor and retail game data.
+        (An earlier fix wrongly used 2057, which is .sav.)"""
+        self.assertEqual(self._get_rtype("test.jrl"), 2056)
 
-    def test_fac_type_is_2039(self):
-        """Bug was: .fac was missing from the map entirely."""
-        self.assertEqual(self._get_rtype("test.fac"), 2039)
+    def test_fac_type_is_2038(self):
+        """.fac is 2038 — verified against PyKotor. (2039 is .bte.)"""
+        self.assertEqual(self._get_rtype("test.fac"), 2038)
 
     def test_bic_type_is_2015(self):
         """Bug was: .bic was missing from the map entirely."""
         self.assertEqual(self._get_rtype("test.bic"), 2015)
 
-    def test_mdx_type_is_3009(self):
-        """Bug was: .mdx was mapped to 3002 (colliding with .rim)."""
-        self.assertEqual(self._get_rtype("test.mdx"), 3009)
+    def test_mdx_type_is_3008(self):
+        """.mdx is 3008 — verified against PyKotor. (3009 is .rsv.)"""
+        self.assertEqual(self._get_rtype("test.mdx"), 3008)
 
     def test_no_duplicate_type_ids(self):
         """
@@ -317,9 +318,10 @@ class TestBug4ERFRestypeMap(unittest.TestCase):
                          "RESTYPE_MAP has colliding type IDs:\n" +
                          "\n".join(collisions))
 
-    def test_txb_type_is_3007(self):
-        """TXB is a KotOR texture binary format, type 3007."""
-        self.assertEqual(self._get_rtype("test.txb"), 3007)
+    def test_txb_type_is_3006(self):
+        """TXB is a KotOR texture binary format, type 3006 (3007 is .tpc) —
+        verified against PyKotor's ResourceType table."""
+        self.assertEqual(self._get_rtype("test.txb"), 3006)
 
     def test_mp3_not_in_map_or_no_collision_with_tpc(self):
         """MP3 is not a standard KotOR ERF resource; if present must not collide with .tpc."""

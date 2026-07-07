@@ -37,7 +37,7 @@ Thumbs.db
 screenshot.png
 screenshots/
 take_screenshot.py
-server.py
+/server.py   # root-level sandbox script only — package server.py files must be tracked
 make_portfolio_shots.py
 make_portfolio_v2.py
 portfolio_shots/

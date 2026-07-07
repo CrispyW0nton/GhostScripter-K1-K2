@@ -56,6 +56,7 @@ from ghostscripter.core.models.dialogue import (
 from ghostscripter.core.export.gff_writer import (   # noqa: F401
     GFFType, GFFStruct, GFF3Writer,
 )
+from ghostscripter.core.export.erf_writer import RESTYPE_IDS as _SHARED_RESTYPE_IDS
 # Also keep bare IntEnum import for local use elsewhere in this file
 from enum import IntEnum as _IntEnum  # used by ERFWriter below
 
@@ -250,27 +251,9 @@ class ERFWriter:
       ResourceSize     DWORD
     """
 
-    RESTYPE_MAP: Dict[str, int] = {
-        # NWScript
-        ".nss": 2009, ".ncs": 2010,
-        # Dialogue & game data
-        ".dlg": 2029,
-        # Creature / placeable / door / item / merchant / sound / trigger / waypoint
-        ".utc": 2027, ".utp": 2045, ".utd": 2043, ".uti": 2025,
-        ".utm": 2052, ".uts": 2036, ".utt": 2032, ".utw": 2059, ".ute": 2041,
-        # 2DA, models
-        ".2da": 2017, ".mdl": 2002, ".mdx": 3009,
-        # Textures / audio
-        ".tpc": 3008, ".tga": 3, ".wav": 4, ".txb": 3007,
-        # Module / area
-        ".are": 2012, ".ifo": 2014,
-        # GIT / LYT / VIS / PTH / LIP
-        ".git": 2023, ".lyt": 3000, ".vis": 3001, ".rim": 3002, ".pth": 3003, ".lip": 3004,
-        # TXI
-        ".txi": 2022,
-        # Journal / biography / faction
-        ".jrl": 2057, ".bic": 2015, ".fac": 2039,
-    }
+    # Single source of truth — the verified table in erf_writer.py
+    # (values cross-checked against PyKotor and retail module RIMs).
+    RESTYPE_MAP: Dict[str, int] = _SHARED_RESTYPE_IDS
 
     def __init__(self, file_type: str = "ERF "):
         self.file_type = file_type.ljust(4)[:4]

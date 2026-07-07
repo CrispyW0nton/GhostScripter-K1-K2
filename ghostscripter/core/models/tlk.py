@@ -49,7 +49,7 @@ _LANGUAGE_ENCODING: Dict[int, str] = {
     2: "cp1252",   # German
     3: "cp1252",   # Italian
     4: "cp1252",   # Spanish
-    5: "cp1252",   # Polish
+    5: "cp1250",   # Polish (Central European — matches PyKotor/TalkEd)
     128: "cp949",  # Korean
     129: "cp950",  # Chinese Traditional
     130: "cp936",  # Chinese Simplified

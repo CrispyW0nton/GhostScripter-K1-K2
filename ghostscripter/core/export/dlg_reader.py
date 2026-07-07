@@ -317,12 +317,14 @@ class GFF3Reader:
             z = self._f32(abs_off + 8)
             value = (x, y, z)
         elif ftype == _ORIENTATION:
-            # ORIENTATION (type 16): stored in field_data as four 32-bit floats (W, X, Y, Z)
+            # ORIENTATION (type 16): stored on disk as four 32-bit floats in
+            # X, Y, Z, W order (PyKotor/HolocronToolset Vector4 convention).
+            # Returned as (w, x, y, z) to mirror GFFStruct.add_orientation().
             abs_off = self._field_data_offset + data_dw
-            w = self._f32(abs_off)
-            x = self._f32(abs_off + 4)
-            y = self._f32(abs_off + 8)
-            z = self._f32(abs_off + 12)
+            x = self._f32(abs_off)
+            y = self._f32(abs_off + 4)
+            z = self._f32(abs_off + 8)
+            w = self._f32(abs_off + 12)
             value = (w, x, y, z)
         else:
             value = data_dw  # Unknown type — return raw dword

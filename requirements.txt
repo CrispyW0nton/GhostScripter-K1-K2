@@ -19,6 +19,16 @@ jsonschema>=4.0.0
 requests>=2.28.0
 flask>=2.3.0
 
+# MCP server (the AI-agent backend — python -m ghostscripter.mcp)
+mcp>=1.2.0
+uvicorn>=0.30.0       # only needed for --mode http / --mode sse
+
+# Dialogue graph analysis (DialogueFile.to_networkx, cycle detection)
+networkx>=3.0
+
+# Texture preview (TGA decoding in the Asset Library)
+Pillow>=10.0.0
+
 # Utilities
 colorama>=0.4.6
 python-dotenv>=1.0.0

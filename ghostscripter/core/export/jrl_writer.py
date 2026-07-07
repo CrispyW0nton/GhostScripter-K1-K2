@@ -3,7 +3,7 @@ GhostScripter-K1-K2 — JRL (Journal) GFF3 Writer + Reader
 =========================================================
 Reads and writes KotOR .jrl journal files in GFF V3.2 binary format.
 
-GFF field layout for JRL
+GFF field layout for JRL (verified against retail K1 global.jrl)
   Root struct (0xFFFFFFFF)
     Categories  LIST
       Category struct (type 0)
@@ -11,17 +11,17 @@ GFF field layout for JRL
         Tag         CEXOSTRING
         Priority    DWORD
         Comment     CEXOSTRING
-        Entries     LIST
+        EntryList   LIST
           Entry struct (type 0)
             ID          DWORD
             Text        CEXOLOCSTRING
-            End         BYTE
-            QuestEntry  BYTE
+            End         WORD (UInt16)
             Comment     CEXOSTRING
 
 References:
+  - Retail K1 global.jrl (Categories → EntryList → ID/End/Text/XP_Percentage)
   - xoreos-tools Aurora JRL parsing
-  - PyKotor resource/formats/gff/jrl.py field names
+  - PyKotor resource/generics/jrl.py field names
 """
 from __future__ import annotations
 
@@ -64,12 +64,15 @@ class JRLWriter:
                 es.add_dword("ID", entry.state_id)
                 text_strref = max(entry.text_strref, -1)
                 es.add_locstring("Text", text_strref, entry.text)
-                es.add_byte("End", 1 if entry.is_end else 0)
-                es.add_byte("QuestEntry", 1 if entry.is_quest_entry else 0)
+                # Retail JRLs store End as a WORD (UInt16), not a BYTE —
+                # the engine's typed GFF getter ignores a mistyped field.
+                es.add_word("End", 1 if entry.is_end else 0)
                 es.add_cexo("Comment", entry.comment)
                 entry_structs.append(es)
 
-            cs.add_list("Entries", entry_structs)
+            # The engine reads "EntryList" (verified against K1 global.jrl);
+            # "Entries" is not recognised by the game.
+            cs.add_list("EntryList", entry_structs)
             cat_structs.append(cs)
 
         root.add_list("Categories", cat_structs)
@@ -128,7 +131,9 @@ class JRLImporter:
             priority=int(cd.get("Priority", 0)),
             comment=str(cd.get("Comment", "")),
         )
-        for ed in cd.get("Entries", []):
+        # "EntryList" is the retail label; "Entries" is read as a fallback
+        # for journals written by GhostScripter ≤ 3.6.0.
+        for ed in cd.get("EntryList", cd.get("Entries", [])):
             cat.entries.append(self._parse_entry(ed))
         return cat
 

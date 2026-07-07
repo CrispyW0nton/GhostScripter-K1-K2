@@ -180,10 +180,6 @@ class GFFStruct:
         """Alias for add_dword64 (PyKotor: set_uint64)."""
         return self.add_dword64(label, v)
 
-    def add_int64(self, label: str, v: int) -> "GFFStruct":
-        """Already defined; included for completeness (PyKotor: set_int64)."""
-        return self.add(label, GFFType.INT64, int(v))
-
     def add_single(self, label: str, v: float) -> "GFFStruct":
         """Alias for add_float (PyKotor: set_single)."""
         return self.add_float(label, v)
@@ -335,12 +331,13 @@ class GFF3Writer:
             self._field_data += struct.pack("<B", len(raw))
             self._field_data += raw
         elif ftype == GFFType.CEXOSTRING:
-            raw = str(value).encode("latin-1", errors="replace")
+            # KotOR reads Western-language strings as windows-1252, not UTF-8.
+            raw = str(value).encode("cp1252", errors="replace")
             self._field_data += struct.pack("<I", len(raw))
             self._field_data += raw
         elif ftype == GFFType.CEXOLOCSTRING:
             strref, text = value
-            raw_text = str(text).encode("utf-8", errors="replace")
+            raw_text = str(text).encode("cp1252", errors="replace")
             if text:
                 sub = struct.pack("<II", 0, len(raw_text)) + raw_text   # lang 0 = English
                 str_count = 1
@@ -365,9 +362,12 @@ class GFF3Writer:
             x, y, z = value
             self._field_data += struct.pack("<fff", float(x), float(y), float(z))
         elif ftype == GFFType.ORIENTATION:
-            # ORIENTATION quaternion (W, X, Y, Z) — 4 floats
+            # ORIENTATION quaternion — stored on disk as X, Y, Z, W
+            # (matches PyKotor/HolocronToolset Vector4 file order, which is
+            # what working GIT camera quaternions use). The add_orientation()
+            # API still takes (w, x, y, z).
             w, x, y, z = value
-            self._field_data += struct.pack("<ffff", float(w), float(x), float(y), float(z))
+            self._field_data += struct.pack("<ffff", float(x), float(y), float(z), float(w))
         elif ftype == GFFType.VOID:
             raw = bytes(value) if value else b""
             self._field_data += struct.pack("<I", len(raw))

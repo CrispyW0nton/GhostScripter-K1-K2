@@ -101,8 +101,9 @@ class TestTLKEncodingConstants(unittest.TestCase):
     def test_spanish_is_cp1252(self):
         self.assertEqual(_LANGUAGE_ENCODING[4], "cp1252")
 
-    def test_polish_is_cp1252(self):
-        self.assertEqual(_LANGUAGE_ENCODING[5], "cp1252")
+    def test_polish_is_cp1250(self):
+        """Polish KotOR text is Central European cp1250 (matches PyKotor)."""
+        self.assertEqual(_LANGUAGE_ENCODING[5], "cp1250")
 
     def test_korean_is_cp949(self):
         self.assertEqual(_LANGUAGE_ENCODING[128], "cp949")

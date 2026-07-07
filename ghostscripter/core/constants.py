@@ -5,7 +5,7 @@ Core constants used throughout the application.
 
 # Application Info
 APP_NAME = "GhostScripter-K1-K2"
-APP_VERSION = "3.6.0"
+APP_VERSION = "3.6.1"
 APP_DESCRIPTION = "KotOR Script + Logic IDE"
 
 # Game Targets

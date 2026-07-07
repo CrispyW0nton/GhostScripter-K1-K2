@@ -189,18 +189,27 @@ class TestMCPErrorHandling(unittest.TestCase):
         self.assertIn("error", data)
 
     def test_missing_installation_returns_error(self):
+        from unittest import mock
         from ghostscripter.mcp.tools import handle_tool, _INSTALLS
-        # Clear cache and ensure no path is set
+        # Clear cache AND disable path auto-detection (registry/default-path
+        # probes would otherwise find a real installation on dev machines and
+        # make this test operate on the user's actual game folder).
+        saved_installs = dict(_INSTALLS)
         _INSTALLS.clear()
         import os
         saved = os.environ.pop("K1_PATH", None)
         try:
-            result = _run(handle_tool("gsListResources", {"game": "K1"}))
+            with mock.patch(
+                "ghostscripter.mcp.tools_pkg._helpers._find_game_path",
+                return_value=None,
+            ):
+                result = _run(handle_tool("gsListResources", {"game": "K1"}))
             data = _json(result)
             self.assertIn("error", data)
         finally:
             if saved:
                 os.environ["K1_PATH"] = saved
+            _INSTALLS.update(saved_installs)
 
     def test_normalize_game_k1_variants(self):
         from ghostscripter.mcp.tools import _normalize_game
@@ -1953,14 +1962,21 @@ class TestWriteOverride(unittest.TestCase):
     def test_no_installation_returns_error(self):
         """writeOverride returns error when no game path is known."""
         import base64
+        from unittest import mock
         from ghostscripter.mcp import tools as t_mod
-        # Ensure no installation cached
+        # Ensure no installation cached AND no auto-detection: without the
+        # patch, the registry/default-path probes find a real installation
+        # on dev machines and this test writes into the user's game folder.
         original = t_mod._INSTALLS.pop("K1", None)
         try:
-            data = self._invoke(
-                game="K1", resref="test", restype="ncs",
-                data_b64=base64.b64encode(b"NCS\x00").decode(),
-            )
+            with mock.patch(
+                "ghostscripter.mcp.tools_pkg._helpers._find_game_path",
+                return_value=None,
+            ):
+                data = self._invoke(
+                    game="K1", resref="test", restype="ncs",
+                    data_b64=base64.b64encode(b"NCS\x00").decode(),
+                )
             self.assertIn("error", data)
         finally:
             if original is not None:
@@ -3838,7 +3854,7 @@ class TestToolsCountV29(unittest.TestCase):
 
     def test_qtpy_migration_no_pyqt5_imports(self):
         """No bare PyQt5 imports remain in ghostscripter source (qtpy migration complete)."""
-        import subprocess, sys
+        import pathlib, subprocess, sys
         r = subprocess.run(
             [sys.executable, "-c",
              "import re, pathlib; "
@@ -3846,7 +3862,8 @@ class TestToolsCountV29(unittest.TestCase):
              "hits = [f for f in files if '__pycache__' not in str(f) and "
              "re.search(r'from PyQt5', f.read_text(errors='replace'))]; "
              "print(len(hits))"],
-            capture_output=True, text=True, cwd="/home/user/webapp"
+            capture_output=True, text=True,
+            cwd=str(pathlib.Path(__file__).resolve().parent.parent)
         )
         self.assertEqual(r.stdout.strip(), "0",
                          "PyQt5 direct imports still present in ghostscripter/")
