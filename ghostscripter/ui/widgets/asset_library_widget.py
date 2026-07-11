@@ -46,7 +46,8 @@ class _GameAssetLoader(QThread):
             rm.load_game(Path(self._game_dir))
             result = {}
             for ext in (".dlg", ".nss", ".2da", ".ncs", ".mdl", ".tga", ".tpc",
-                        ".uti", ".utc", ".utp", ".utt", ".utm", ".uts", ".utw"):
+                        ".uti", ".utc", ".utp", ".utt", ".utm", ".uts", ".utw",
+                        ".jrl"):
                 entries = rm.list_by_type(ext)
                 result[ext] = sorted(set(
                     e.resref + ext for e in entries
@@ -161,6 +162,7 @@ class AssetLibraryWidget(QWidget):
             ".utm":  ("Merchants (.utm)",    "🏪", "#4ec9b0"),
             ".uts":  ("Sounds (.uts)",       "🔊", "#ce9178"),
             ".utw":  ("Waypoints (.utw)",    "📍", "#569cd6"),
+            ".jrl":  ("Journals (.jrl)",     "📖", "#c586c0"),
         }
 
         for ext, (label, icon, color) in type_meta.items():

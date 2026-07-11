@@ -131,5 +131,48 @@ class TestJrlAssetRouting(unittest.TestCase):
         self.assertTrue(any("Could not parse" in line for line in stub.logs))
 
 
+class TestAssetLibraryListsJrl(unittest.TestCase):
+    """The Asset Library must scan for and display .jrl resources —
+    otherwise there is nothing to double-click and the routing is dead code."""
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+            from qtpy.QtWidgets import QApplication
+            cls._app = QApplication.instance() or QApplication(sys.argv[:1])
+        except Exception:
+            raise unittest.SkipTest("Qt not available in this environment")
+
+    def test_loader_scans_jrl_extension(self):
+        import inspect
+        from ghostscripter.ui.widgets.asset_library_widget import _GameAssetLoader
+
+        src = inspect.getsource(_GameAssetLoader.run)
+        self.assertIn('".jrl"', src,
+                      "_GameAssetLoader.run() must include .jrl in its scan list")
+
+    def test_game_tree_shows_journal_category(self):
+        from qtpy.QtCore import Qt
+        from ghostscripter.ui.widgets.asset_library_widget import AssetLibraryWidget
+
+        w = AssetLibraryWidget(game_dir=None)
+        w._game_assets = {".jrl": ["global.jrl", "module.jrl"]}
+        w._populate_game_asset_tab()
+
+        cats = [w.game_tree.topLevelItem(i).text(0)
+                for i in range(w.game_tree.topLevelItemCount())]
+        journal_cats = [c for c in cats if "Journals (.jrl)" in c]
+        self.assertEqual(len(journal_cats), 1,
+                         f"Expected one Journals category, tree has: {cats}")
+
+        cat_item = w.game_tree.topLevelItem(cats.index(journal_cats[0]))
+        self.assertEqual(cat_item.childCount(), 2)
+        child = cat_item.child(0)
+        self.assertEqual(child.text(0), "global.jrl")
+        meta = child.data(0, Qt.UserRole)
+        self.assertEqual(meta, {"name": "global", "ext": ".jrl"})
+
+
 if __name__ == "__main__":
     unittest.main()
