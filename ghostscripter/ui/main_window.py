@@ -1187,11 +1187,17 @@ class MainWindow(QMainWindow):
         elif ext == ".2da":
             self.ipc_open_2da(resref)
 
+        # ── Journal (.jrl) — open in the Journal Editor ───────────────────────
+        elif ext == ".jrl":
+            if not raw_data:
+                raw_data = self._read_asset_from_rm(resref, ext)
+            self._open_journal_asset(resref, raw_data)
+
         # ── GFF-based templates (.uti, .utc, .utp, .utt, .utm, .uts, .utw,
-        #    .are, .git, .gic, .ifo, .bic, .gui, .fac, .jrl, .pth) ───────────
+        #    .are, .git, .gic, .ifo, .bic, .gui, .fac, .pth) ─────────────────
         elif ext in {".uti", ".utc", ".utp", ".utt", ".utm", ".uts", ".utw",
                      ".are", ".git", ".gic", ".ifo", ".bic", ".gui",
-                     ".fac", ".jrl", ".pth"}:
+                     ".fac", ".pth"}:
             # raw_data may be None if the widget's RM read failed (e.g. BIF
             # access issue). Retry via the asset library's ResourceManager.
             if not raw_data:
@@ -1209,6 +1215,39 @@ class MainWindow(QMainWindow):
         # ── Anything else — show hex/text dump in detail panel ────────────────
         else:
             self._open_generic_asset(resref, ext, raw_data)
+
+    def _open_journal_asset(self, resref: str, raw_data) -> None:
+        """Open a .jrl asset from the Asset Library in the Journal Editor."""
+        if not raw_data:
+            self.log(f"  ✗ No data for {resref}.jrl")
+            return
+        from ghostscripter.core.export.jrl_writer import JRLImporter
+        try:
+            jrl = JRLImporter().import_from_bytes(raw_data)
+            jrl.name = resref
+        except Exception as exc:
+            self.log(f"  ✗ Could not parse {resref}.jrl: {exc}")
+            return
+        # Reuse an already-open Journal Editor tab instead of stacking a second
+        # one — but never silently discard unsaved edits.
+        for i in range(self.editor_tabs.count()):
+            w = self.editor_tabs.widget(i)
+            if isinstance(w, JournalEditorWidget):
+                if w.is_dirty:
+                    resp = QMessageBox.question(
+                        self, "Unsaved Journal Changes",
+                        f"The Journal Editor has unsaved changes.\n"
+                        f"Replace them with {resref}.jrl?",
+                        QMessageBox.Yes | QMessageBox.No,
+                    )
+                    if resp != QMessageBox.Yes:
+                        return
+                w.set_journal(jrl)
+                self.editor_tabs.setCurrentIndex(i)
+                self.log(f"  ✓ Loaded {resref}.jrl into Journal Editor")
+                return
+        self.open_journal_editor(journal=jrl)
+        self.log(f"  ✓ Opened {resref}.jrl in Journal Editor")
 
     # ── GFF template types that get a full viewer tab ─────────────────────────
     _GFF_VIEWER_TYPES = frozenset({
