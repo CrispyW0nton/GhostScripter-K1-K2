@@ -23,7 +23,7 @@ def _make_lip(duration: float, frames: list[tuple[float, int]]) -> bytes:
 
 
 class TestLIPConstants(unittest.TestCase):
-    """Verify the LIPShape enum values match the PyKotor reference."""
+    """Verify the retail-validated LIP semantic table."""
 
     def setUp(self):
         from ghostscripter.ui.widgets import lip_editor_widget as mod
@@ -35,11 +35,11 @@ class TestLIPConstants(unittest.TestCase):
     def test_neutral_at_index_0(self):
         self.assertEqual(self.mod.LIP_SHAPES[0], "NEUTRAL")
 
-    def test_ee_at_index_1(self):
-        self.assertEqual(self.mod.LIP_SHAPES[1], "EE")
+    def test_ih_iy_at_index_1(self):
+        self.assertEqual(self.mod.LIP_SHAPES[1], "IH_IY")
 
-    def test_kg_at_index_15(self):
-        self.assertEqual(self.mod.LIP_SHAPES[15], "KG")
+    def test_ao_at_index_15(self):
+        self.assertEqual(self.mod.LIP_SHAPES[15], "AO")
 
     def test_all_names_unique(self):
         names = self.mod.LIP_SHAPES
@@ -81,9 +81,17 @@ class TestPhonemeMap(unittest.TestCase):
         # B sound → MPB (lips pressed, index 11)
         self.assertEqual(self.pmap.get("B"), 11)
 
-    def test_known_phoneme_s_is_sts(self):
-        # S sound → STS (teeth together, index 7)
-        self.assertEqual(self.pmap.get("S"), 7)
+    def test_known_phoneme_s_is_shape_6(self):
+        self.assertEqual(self.pmap.get("S"), 6)
+
+    def test_revised_phoneme_values(self):
+        self.assertEqual(self.pmap.get("D"), 6)
+        self.assertEqual(self.pmap.get("SH"), 7)
+        self.assertEqual(self.pmap.get("T"), 10)
+        self.assertEqual(self.pmap.get("L"), 12)
+        self.assertEqual(self.pmap.get("R"), 13)
+        self.assertEqual(self.pmap.get("AW"), 14)
+        self.assertEqual(self.pmap.get("AO"), 15)
 
     def test_known_phoneme_m_is_mpb(self):
         # M sound → MPB (index 11)

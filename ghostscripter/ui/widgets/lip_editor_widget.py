@@ -16,11 +16,8 @@ LIP Binary Format (V1.0, from PyKotor lip_data.py + KotOR.js reference):
     Time        float32   seconds from start of audio
     Shape       uint8     mouth-shape index 0-15 (LIPShape enum)
 
-LIPShape enum (16 values, 0 = NEUTRAL):
-    0  NEUTRAL   1  EE    2  EH    3  AH
-    4  OH        5  OOH   6  Y     7  STS
-    8  FV        9  NG    10 TH    11 MPB
-    12 TD        13 SH    14 L     15 KG
+The numeric shape values are authoritative.  Semantic labels use the
+retail-validated Reone mapping (0 = NEUTRAL/rest).
 
 Usage:
     widget = LIPEditorWidget(parent)
@@ -42,61 +39,15 @@ from qtpy.QtWidgets import (
     QSpinBox, QScrollArea,
 )
 
+from ghostscripter.core.lip import LIP_SHAPES, PHONEME_MAP
 
-# ---------------------------------------------------------------------------
-# LIP shape constants (mirrors PyKotor LIPShape enum)
-# ---------------------------------------------------------------------------
-LIP_SHAPES: list[str] = [
-    "NEUTRAL",  # 0  – rest/silence
-    "EE",       # 1  – "see", "teeth"
-    "EH",       # 2  – "get", "bet"
-    "AH",       # 3  – "father", "bat"
-    "OH",       # 4  – "go", "boat"
-    "OOH",      # 5  – "too", "blue"
-    "Y",        # 6  – "yes", "you"
-    "STS",      # 7  – "stop", "sick"
-    "FV",       # 8  – "five", "fish"
-    "NG",       # 9  – "ring", "nacho"
-    "TH",       # 10 – "thin", "that"
-    "MPB",      # 11 – "bump", "moose"
-    "TD",       # 12 – "top", "door"
-    "SH",       # 13 – "measure", "cheese"
-    "L",        # 14 – "lip", "read"
-    "KG",       # 15 – "kick", "green"
-]
-
-# Phoneme → shape mapping (from PyKotor LIPShape.from_phoneme)
-PHONEME_MAP: dict[str, int] = {
-    "AA": 3, "AE": 3, "AH": 3, "AO": 4, "AW": 3, "AY": 3,
-    "B": 11, "CH": 13, "D": 12, "DH": 10,
-    "EH": 2, "ER": 2, "EY": 1,
-    "F": 8, "G": 15, "HH": 15,
-    "IH": 1, "IY": 1, "JH": 13,
-    "K": 15, "L": 14, "M": 11, "N": 9, "NG": 9,
-    "OW": 4, "OY": 4, "P": 11, "R": 14,
-    "S": 7, "SH": 13, "T": 12, "TH": 10,
-    "UH": 5, "UW": 5, "V": 8, "W": 5,
-    "Y": 6, "Z": 7, "ZH": 13,
-}
 
 # Colour for each shape on the timeline (HSV-based palette)
 _SHAPE_COLORS: list[str] = [
-    "#555555",  # 0  NEUTRAL
-    "#4ec9b0",  # 1  EE
-    "#9cdcfe",  # 2  EH
-    "#dcdcaa",  # 3  AH
-    "#ce9178",  # 4  OH
-    "#c586c0",  # 5  OOH
-    "#6a9955",  # 6  Y
-    "#d7ba7d",  # 7  STS
-    "#f48771",  # 8  FV
-    "#569cd6",  # 9  NG
-    "#4fc1ff",  # 10 TH
-    "#b5cea8",  # 11 MPB
-    "#e6db74",  # 12 TD
-    "#ae81ff",  # 13 SH
-    "#a6e22e",  # 14 L
-    "#fd971f",  # 15 KG
+    "#555555", "#4ec9b0", "#9cdcfe", "#dcdcaa",
+    "#ce9178", "#c586c0", "#6a9955", "#d7ba7d",
+    "#f48771", "#569cd6", "#4fc1ff", "#b5cea8",
+    "#e6db74", "#ae81ff", "#a6e22e", "#fd971f",
 ]
 
 LIP_HEADER = b"LIP V1.0"

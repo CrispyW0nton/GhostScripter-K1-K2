@@ -209,12 +209,55 @@ _FUNC_PATTERN = re.compile(
     r'([A-Za-z_][A-Za-z0-9_]*)\s*\(([^)]*)\)\s*;'
 )
 _CONST_PATTERN = re.compile(
-    r'^(int|float|string)\s+([A-Z][A-Z0-9_d]*)\s*=\s*([^;]+);'
+    # ``sLanguage`` is a real global declaration in both bundled headers, so
+    # restricting names to ALL_CAPS silently made the public database incomplete.
+    r'^(?:const\s+)?(int|float|string)\s+([A-Za-z_][A-Za-z0-9_]*)\s*=\s*([^;]+);'
 )
 _PARAM_PATTERN = re.compile(
-    r'(void|object|int|float|effect|event|location|string|vector|talent|action)\s+'
-    r'([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*([^,)]+))?'
+    # K1's retail-derived header uses the legacy aliases INT and OBJECT_ID in
+    # SetAvailableNPCId.  Accept them and normalise below.
+    r'(void|object|int|float|effect|event|location|string|vector|talent|action|INT|OBJECT_ID)\s+'
+    r'([A-Za-z_][A-Za-z0-9_]*)(?:\s*=\s*(.+))?\s*$'
 )
+
+_PARAM_TYPE_ALIASES = {
+    "INT": "int",
+    "OBJECT_ID": "object",
+}
+
+
+def _split_params(param_str: str) -> List[str]:
+    """Split a signature's parameters without splitting vector/string defaults.
+
+    A plain ``str.split(',')`` corrupts official defaults such as
+    ``vector vOrigin=[0.0,0.0,0.0]``.  This small scanner only treats commas at
+    nesting depth zero and outside quoted strings as separators.
+    """
+    parts: List[str] = []
+    start = 0
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    for index, char in enumerate(param_str):
+        if quote is not None:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in ('"', "'"):
+            quote = char
+        elif char in "([{":
+            depth += 1
+        elif char in ")]}" and depth:
+            depth -= 1
+        elif char == "," and depth == 0:
+            parts.append(param_str[start:index])
+            start = index + 1
+    parts.append(param_str[start:])
+    return parts
 
 
 def _parse_params(param_str: str) -> List[NWParam]:
@@ -223,14 +266,13 @@ def _parse_params(param_str: str) -> List[NWParam]:
     param_str = param_str.strip()
     if not param_str or param_str == "void":
         return params
-    # Split by comma respecting basic types
-    for part in param_str.split(","):
+    for part in _split_params(param_str):
         part = part.strip()
         if not part:
             continue
         m = _PARAM_PATTERN.match(part)
         if m:
-            ptype = m.group(1)
+            ptype = _PARAM_TYPE_ALIASES.get(m.group(1), m.group(1))
             pname = m.group(2)
             pdefault = m.group(3).strip() if m.group(3) else None
             params.append(NWParam(type=ptype, name=pname, default=pdefault))
@@ -327,6 +369,8 @@ class NWScriptDB:
         self.game = game
         self.functions: List[NWFunction] = []
         self.constants: List[NWConstant] = []
+        self.constant_declarations: List[NWConstant] = []
+        self.duplicate_constants: Dict[str, List[NWConstant]] = {}
         self._func_by_name: Dict[str, NWFunction] = {}
         self._const_by_name: Dict[str, NWConstant] = {}
         self._func_categories: Dict[str, List[NWFunction]] = {}
@@ -375,7 +419,21 @@ class NWScriptDB:
         if not path.exists():
             print(f"[NWScriptDB] nwscript.nss not found: {path}", file=sys.stderr)
             return
-        self.functions, self.constants = parse_nwscript(path)
+        self.functions, declarations = parse_nwscript(path)
+        self.constant_declarations = declarations
+
+        # The TSL header redeclares five FEAT_* symbols with corrected values.
+        # NWScript resolves the later declaration; exposing both made searches
+        # return contradictory data.  Keep the declarations for provenance but
+        # expose one active value (the last declaration) in the public DB.
+        active_constants: Dict[str, NWConstant] = {}
+        for constant in declarations:
+            if constant.name in active_constants:
+                self.duplicate_constants.setdefault(
+                    constant.name, [active_constants[constant.name]]
+                ).append(constant)
+            active_constants[constant.name] = constant
+        self.constants = list(active_constants.values())
         self._func_by_name = {f.name: f for f in self.functions}
         self._const_by_name = {c.name: c for c in self.constants}
 

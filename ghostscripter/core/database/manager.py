@@ -234,7 +234,7 @@ class DatabaseManager:
     def get_quest_snapshots(self, project_id: str,
                              quest_id: str) -> List[Dict[str, Any]]:
         rows = self._conn.execute("""
-            SELECT id, saved_at FROM quest_snapshots
+            SELECT id, data_json, saved_at FROM quest_snapshots
             WHERE project_id = ? AND quest_id = ?
             ORDER BY saved_at DESC
         """, (project_id, quest_id)).fetchall()

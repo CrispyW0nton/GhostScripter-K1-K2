@@ -27,10 +27,10 @@ _INSTALLS: dict[str, Any] = {}
 # from O(n×parse) to O(n×dict-lookup) after the first call.
 _2DA_CACHE: dict[str, dict[str, Any]] = {}
 
-# ─── Exhaustive default install path list ─────────────────────────────────────
-# Covers: Steam (Linux flat, Linux compat, macOS, Windows x86/x64),
-#         GOG (Windows), LucasArts disc (Windows), Epic Games Store,
-#         Xbox Game Pass, Mac App Store, and common manual installs.
+# ─── Curated default install path candidates ──────────────────────────────────
+# Covers common Steam, GOG, disc, Epic, Microsoft Store, and macOS layouts.
+# These are discovery candidates, not a claim that every storefront currently
+# ships every game at each listed path; chitin.key validation remains mandatory.
 # Paths are probed in order; first directory containing chitin.key wins.
 
 _home = os.path.expanduser("~")
@@ -132,84 +132,10 @@ _DEFAULT_PATHS: dict[str, list[str]] = {
     ],
 }
 
-# ─── Hardcoded module name lookup ─────────────────────────────────────────────
-# Sourced from PyKotor's installation.py HARDCODED_MODULE_NAMES constant.
-# Maps lowercase module-ID stems (no extension) to human-readable area names.
-# Used by moduleOverview and getArea to provide a display name when the .are
-# GFF is unavailable or the Name field is blank.
-#
-# Reference: PyKotor/Libraries/PyKotor/src/pykotor/extract/installation.py
+# Area display names must come from the installed module's ARE Name LocString
+# and that installation's dialog.tlk.  An absent or blank live name remains
+# unknown; GhostScripter intentionally ships no guessed area-name catalogue.
 HARDCODED_MODULE_NAMES: dict[str, str] = {
-    # KotOR 1 ─────────────────────────────────────────────────────────────
-    "stunt_00":  "Ebon Hawk - Cutscene (Vision Sequences)",
-    "001ebo":    "Ebon Hawk - Interior (Prologue)",
-    "006ebo":    "Ebon Hawk - Interior",
-    "007ebo":    "Ebon Hawk - Interior (Leviathan escape)",
-    "154ebo":    "Ebon Hawk - Interior (Lehon)",
-    "danm13":    "Dantooine - Jedi Enclave (Ruins cutscene)",
-    "danm14aa":  "Dantooine - Jedi Enclave",
-    "danm14ab":  "Dantooine - Jedi Council",
-    "danm14ac":  "Dantooine - Jedi Training Grounds",
-    "danm15":    "Dantooine - Matale Grounds",
-    "danm16":    "Dantooine - Sandral Grounds",
-    "danm17":    "Dantooine - Courtyard",
-    "danm18":    "Dantooine - Crystal Cave",
-    "danm19":    "Dantooine - Ruins (Rakatan)",
-    "end_m01aa": "Star Forge - Deck 1",
-    "end_m01ab": "Star Forge - Deck 2",
-    "end_m01ac": "Star Forge - Deck 3",
-    "end_m01ad": "Star Forge - Observation Deck",
-    "lev_m26aa": "Leviathan - Hangar",
-    "lev_m26ab": "Leviathan - Prison Block",
-    "lev_m26ac": "Leviathan - Command Deck",
-    "lev_m26ad": "Leviathan - Bridge",
-    "manm26aa":  "Manaan - Ahto City East",
-    "manm26ab":  "Manaan - Ahto City West",
-    "manm26ac":  "Manaan - Ahto City (Docking Bay)",
-    "manm26ad":  "Manaan - Sith Base",
-    "manm26ae":  "Manaan - Hrakert Rift",
-    "manm26ba":  "Manaan - Sea Floor",
-    "manm26bb":  "Manaan - Kolto Control",
-    "korr_m33aa": "Korriban - Dreshdae",
-    "korr_m33ab": "Korriban - Valley of Dark Lords",
-    "korr_m33ac": "Korriban - Tomb of Ajunta Pall",
-    "korr_m33ad": "Korriban - Tomb of Marka Ragnos",
-    "korr_m33ae": "Korriban - Tomb of Tulak Hord",
-    "korr_m33af": "Korriban - Tomb of Naga Sadow",
-    "korr_m33ba": "Korriban - Sith Academy",
-    "tat_m17aa":  "Tatooine - Anchorhead",
-    "tat_m17ab":  "Tatooine - Dune Sea",
-    "tat_m17ac":  "Tatooine - Sand People Territory",
-    "tat_m17b":   "Tatooine - Czerka Office",
-    "tat_m17c":   "Tatooine - Ebon Hawk Landing Site",
-    "tat_m17d":   "Tatooine - Krayt Dragon Cave",
-    "tar_m02aa":  "Taris - Undercity",
-    "tar_m02ab":  "Taris - Undercity (Outpost)",
-    "tar_m03aa":  "Taris - Lower City",
-    "tar_m03ab":  "Taris - Lower City (Apartments)",
-    "tar_m04aa":  "Taris - Upper City North",
-    "tar_m04ab":  "Taris - Upper City South",
-    "tar_m04ac":  "Taris - Cantina",
-    "tar_m05aa":  "Taris - Sith Base",
-    "tar_m06aa":  "Taris - Vulkar Base",
-    "tar_m07aa":  "Taris - Hidden Bek Base",
-    "tar_m08aa":  "Taris - Black Vulkar Base (Garage)",
-    "tar_m09aa":  "Taris - Swoop Platform",
-    "tar_m10aa":  "Taris - Sewers",
-    "tar_m11aa":  "Taris - Gamorrean Stronghold",
-    "tar_m12aa":  "Taris - Davik's Estate",
-    # KotOR 2 / TSL ───────────────────────────────────────────────────────
-    "001ebo_p":   "Ebon Hawk - Prologue",
-    "003ebo":     "Ebon Hawk - Harbinger Escape",
-    "005ebo":     "Ebon Hawk - Goto's Yacht Escape",
-    "610dan_m31aa": "Dantooine - Rebuilt Enclave",
-    "610dan_m40aa": "Dantooine - Enclave Sublevel",
-    "607cor_m31aa": "Citadel Station - Residential",
-    "702nar_m31aa": "Nar Shaddaa - Entertainment Promenade",
-    "711kat_m30aa": "Korriban - Sith Academy (Ruins)",
-    "800koo_m31aa": "Ravager - Bridge",
-    "901malachor":  "Malachor V - Surface",
-    "905malachor":  "Malachor V - Core",
 }
 
 
@@ -397,7 +323,7 @@ def _validate_resref(resref: str, context: str = "") -> str | None:
     if len(resref) > 16:
         prefix = f"{context}: " if context else ""
         return f"{prefix}resref {resref!r} exceeds 16 characters (KotOR limit)."
-    bad = [c for c in resref if not (c.isalnum() or c in "_-")]
+    bad = [c for c in resref if not (c.isascii() and (c.isalnum() or c in "_-"))]
     if bad:
         prefix = f"{context}: " if context else ""
         return f"{prefix}resref {resref!r} contains invalid characters: {bad!r}."
@@ -459,6 +385,9 @@ def _err(msg: str) -> List[types.TextContent]:
 
 def _prune(obj: Any, depth: int) -> Any:
     """Recursively prune nested dicts/lists to *depth* levels."""
+    if isinstance(obj, (bytes, bytearray, memoryview)):
+        raw = bytes(obj)
+        return {"encoding": "hex", "data": raw.hex(), "byte_length": len(raw)}
     if depth <= 0:
         return "..." if isinstance(obj, (dict, list)) else obj
     if isinstance(obj, dict):
@@ -466,6 +395,21 @@ def _prune(obj: Any, depth: int) -> Any:
     if isinstance(obj, list):
         return [_prune(item, depth - 1) for item in obj]
     return obj
+
+
+def read_module_resource(rm: Any, module_id: str, filename: str) -> bytes | None:
+    """Read a resource without losing its module-capsule association.
+
+    Current ResourceManager instances expose ``read_from_module``.  The
+    conservative fallback exists for small test/adapter readers and never
+    asks for an ambiguous bare ``module.ifo``.
+    """
+    contextual_reader = getattr(type(rm), "read_from_module", None)
+    if callable(contextual_reader):
+        return rm.read_from_module(module_id, filename)
+    if filename.casefold() == "module.ifo":
+        return rm.read(f"{module_id}.ifo")
+    return rm.read(filename)
 
 
 # ─── Path-safety helpers ──────────────────────────────────────────────────────
@@ -567,14 +511,32 @@ def gff_locstr(
         return None
     if isinstance(entry, str):
         return entry or None
+    # The read-only GFF3Reader representation is ``(strref, english_text)``.
+    # Preserve an embedded substring first, then resolve the live TLK below.
+    if isinstance(entry, (tuple, list)) and len(entry) >= 2:
+        embedded = entry[1]
+        if isinstance(embedded, str) and embedded:
+            return embedded
+        entry = {"strref": entry[0]}
     if isinstance(entry, dict):
         for sub_key in ("0", 0, "value"):
             v = entry.get(sub_key)
             if isinstance(v, str) and v:
                 return v
+        # Lossless typed GFF documents nest LocString data under ``value``.
+        typed_value = entry.get("value")
+        if isinstance(typed_value, dict):
+            substrings = typed_value.get("substrings", {})
+            if isinstance(substrings, dict):
+                for sub_key in ("0", 0, "1", 1):
+                    v = substrings.get(sub_key)
+                    if isinstance(v, str) and v:
+                        return v
         # TLK strref fallback
         if include_tlk and rm is not None:
             strref = entry.get("strref", entry.get("StrRef"))
+            if strref is None and isinstance(typed_value, dict):
+                strref = typed_value.get("stringref", typed_value.get("strref"))
             if strref is not None:
                 try:
                     strref = int(strref)
@@ -587,7 +549,12 @@ def gff_locstr(
                     if tlk_bytes:
                         tlk = TLKService.parse_bytes(tlk_bytes, "dialog.tlk")
                         result = TLKService.lookup(tlk, [strref])
-                        text = result.get(strref, {}).get("text")
+                        # TLKService.lookup returns an ordered list.  Retain
+                        # compatibility with older dict-shaped adapters.
+                        if isinstance(result, list):
+                            text = result[0].get("text") if result else None
+                        else:
+                            text = result.get(strref, {}).get("text")
                         if text:
                             return text
                 except Exception:

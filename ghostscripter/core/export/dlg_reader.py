@@ -43,7 +43,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 from ghostscripter.core.models.dialogue import (
-    DialogueFile, DialogueNode, DialogueBranch, DLGAnimation,
+    DialogueFile, DialogueNode, DialogueBranch, DLGAnimation, END_NODE_ID,
 )
 
 log = logging.getLogger(__name__)
@@ -220,7 +220,9 @@ class GFF3Reader:
         abs_off = self._field_data_offset + data_offset
         size = self._u32(abs_off)
         raw = self._data[abs_off + 4: abs_off + 4 + size]
-        return raw.decode("utf-8", errors="replace")
+        # Aurora/Odyssey GFF strings use the game's legacy Windows code page,
+        # not UTF-8.  Western K1/K2 resources (and our writer) use cp1252.
+        return raw.decode("cp1252", errors="replace")
 
     def _read_resref(self, data_offset: int) -> str:
         """Read a RESREF (length-prefixed, max 16 bytes) from field data."""
@@ -244,7 +246,7 @@ class GFF3Reader:
         for _ in range(str_count):
             lang_id = self._u32(pos)
             length  = self._u32(pos + 4)
-            text    = self._data[pos + 8: pos + 8 + length].decode("utf-8", errors="replace")
+            text    = self._data[pos + 8: pos + 8 + length].decode("cp1252", errors="replace")
             # lang 0 = English (masculine), lang 1 = English (feminine)
             if lang_id in (0, 1) and not english:
                 english = text
@@ -524,6 +526,7 @@ class DLGImporter:
                         reader.file_type, name)
 
         dlg = DialogueFile(name=name, file_path=file_path)
+        dlg._source_bytes = bytes(data)
 
         # ── Top-level fields ─────────────────────────────────────
         # EndConversation = the script called when the conversation ends normally.
@@ -545,6 +548,7 @@ class DLGImporter:
         dlg.unequip_items    = bool(_int(root, "UnequipItems"))
         dlg.unequip_h_item   = bool(_int(root, "UnequipHItem"))
         dlg.word_count       = _int(root, "NumWords")
+        dlg.source_game = self._detect_source_game(root)
 
         # ── Entry nodes (NPC lines) ──────────────────────────────
         entry_list = root.get("EntryList", [])
@@ -575,6 +579,14 @@ class DLGImporter:
             except Exception:
                 log.exception("DLGImporter: error parsing starter[%d] of '%s'", idx, name)
 
+        self._capture_source_state(dlg)
+
+        # Keep a canonical typed copy of the source GFF beside the editor
+        # model.  Re-export overlays edits onto these structs, preserving
+        # StuntList, root metadata, conditional parameters, localized-string
+        # variants, and fields introduced by other tools or future versions.
+        self._attach_typed_source(dlg, data)
+
         # ── Auto-layout nodes ────────────────────────────────────
         x_entry, x_reply = 60, 360
         y_step = 110
@@ -591,6 +603,150 @@ class DLGImporter:
             name, len(dlg.entries), len(dlg.replies), len(dlg.starters), elapsed,
         )
         return dlg
+
+    @staticmethod
+    def _capture_source_state(dlg: DialogueFile) -> None:
+        """Remember modeled import values so untouched fields stay untouched.
+
+        The preservation writer compares current generated values against this
+        snapshot.  It therefore does not add dozens of optional default fields
+        to sparse stock structs, while still writing fields the user actually
+        changes later.
+        """
+        from ghostscripter.core.export.dlg_writer import DLGExporter
+        from ghostscripter.core.export.gff_writer import GFFType
+
+        game = dlg.source_game or "K1"
+        exporter = DLGExporter()
+
+        dlg._source_state = {
+            "EndConversation": dlg.on_end or "",
+            "EndConverAbort": dlg.on_abort or "",
+            "Skippable": 1 if dlg.skippable else 0,
+            "DelayEntry": dlg.delay_entry,
+            "DelayReply": dlg.delay_reply,
+            "AmbientTrack": dlg.ambient_track or "",
+            "AnimatedCut": 1 if dlg.animated_cut else 0,
+            "CameraModel": dlg.camera_model or "",
+            "ConversationType": dlg.conversation_type,
+            "ComputerType": dlg.computer_type,
+            "OldHitCheck": 1 if dlg.old_hit_check else 0,
+            "UnequipItems": 1 if dlg.unequip_items else 0,
+            "UnequipHItem": 1 if dlg.unequip_h_item else 0,
+            "NumWords": dlg.word_count,
+        }
+
+        def scalar_values(struct) -> Dict[str, Any]:
+            return {
+                label: value
+                for label, field_type, value in struct.fields
+                if field_type not in {GFFType.LIST, GFFType.STRUCT}
+            }
+
+        for node in dlg.entries:
+            node._source_state = scalar_values(
+                exporter._make_node_struct(node, "entry", game)
+            )
+            for animation in node.animations:
+                animation._source_state = {
+                    "Participant": animation.participant,
+                    "Animation": animation.animation_id,
+                }
+            for branch in node.branches:
+                branch._source_state = scalar_values(
+                    exporter._make_link_struct(branch, game)
+                )
+        for node in dlg.replies:
+            node._source_state = scalar_values(
+                exporter._make_node_struct(node, "reply", game)
+            )
+            for animation in node.animations:
+                animation._source_state = {
+                    "Participant": animation.participant,
+                    "Animation": animation.animation_id,
+                }
+            for branch in node.branches:
+                branch._source_state = scalar_values(
+                    exporter._make_link_struct(branch, game)
+                )
+        for branch in dlg.starters:
+            branch._source_state = scalar_values(
+                exporter._make_link_struct(branch, game)
+            )
+
+    @staticmethod
+    def _detect_source_game(root: Dict) -> str:
+        """Infer K1/K2 from fields that exist only in TSL dialogue files."""
+        k2_root_fields = {
+            "NumWords", "StuntList", "AlienRaceOwner", "PostProcOwner",
+            "RecordNoVO", "NextNodeID",
+        }
+        if any(label in root for label in k2_root_fields):
+            return "K2"
+
+        k2_node_fields = {
+            "Script2", "CameraID", "CameraAnimation", "CamFieldOfView",
+            "CamHeightOffset", "CamVidEffect", "TarHeightOffset",
+            "NodeUnskippable", "AlienRaceNode", "Emotion", "FacialAnim",
+            "NodeID", "PostProcNode", "ActionParam1", "ActionParam1b",
+        }
+        for list_name in ("EntryList", "ReplyList"):
+            for node in root.get(list_name, []):
+                if any(label in node for label in k2_node_fields):
+                    return "K2"
+                link_name = "RepliesList" if list_name == "EntryList" else "EntriesList"
+                for link in node.get(link_name, []):
+                    if any(label in link for label in ("Active2", "DisplayInactive")):
+                        return "K2"
+        return "K1"
+
+    @staticmethod
+    def _attach_typed_source(dlg: DialogueFile, data: bytes) -> None:
+        """Attach PyKotor GFF structs to model objects for faithful export.
+
+        PyKotor is a declared runtime dependency and retains every typed GFF
+        field.  If it is unavailable or cannot represent a source file, we
+        mark the dialogue unsafe to rebuild; the exporter then refuses with an
+        explicit fidelity error rather than silently deleting stock metadata.
+        """
+        try:
+            from pykotor.resource.formats.gff import read_gff  # type: ignore
+
+            raw_gff = read_gff(data)
+            dlg._raw_gff = raw_gff
+            root = raw_gff.root
+
+            raw_entries = root.get_list("EntryList")
+            raw_replies = root.get_list("ReplyList")
+            raw_starters = root.get_list("StartingList")
+
+            for node, raw_node in zip(dlg.entries, raw_entries or []):
+                DLGImporter._attach_raw_node(node, raw_node, "RepliesList")
+            for node, raw_node in zip(dlg.replies, raw_replies or []):
+                DLGImporter._attach_raw_node(node, raw_node, "EntriesList")
+            for branch, raw_link in zip(dlg.starters, raw_starters or []):
+                branch._raw_gff = raw_link
+        except Exception as exc:
+            dlg._raw_gff = None
+            dlg._unsupported_fidelity_fields = [
+                "typed source GFF could not be retained "
+                f"({type(exc).__name__}: {exc})"
+            ]
+            log.warning(
+                "DLGImporter: source fidelity data unavailable; saving this "
+                "imported dialogue will be refused: %s", exc,
+            )
+
+    @staticmethod
+    def _attach_raw_node(node: DialogueNode, raw_node: Any,
+                         link_label: str) -> None:
+        node._raw_gff = raw_node
+        raw_anims = raw_node.get_list("AnimList")
+        raw_links = raw_node.get_list(link_label)
+        for animation, raw_animation in zip(node.animations, raw_anims or []):
+            animation._raw_gff = raw_animation
+        for branch, raw_link in zip(node.branches, raw_links or []):
+            branch._raw_gff = raw_link
 
     def import_from_file(self, path: str | Path) -> DialogueFile:
         path = Path(path)
@@ -719,9 +875,13 @@ class DLGImporter:
         return node
 
     def _parse_link(self, d: Dict, idx: int) -> DialogueBranch:
+        raw_target = _int(d, "Index", END_NODE_ID)
+        # Index is a DWORD in stock DLGs, so -1 arrives as 0xFFFFFFFF.
+        # Normalize both signed and unsigned spellings to the model sentinel.
+        target = END_NODE_ID if raw_target in (-1, 0xFFFFFFFF) else raw_target
         branch = DialogueBranch(
             branch_id=idx,
-            target_node_id=_int(d, "Index", -1),
+            target_node_id=target,
             active_script=_str(d, "Active"),
             active_script2=_str(d, "Active2"),
             is_child=bool(_int(d, "IsChild")),

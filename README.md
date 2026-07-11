@@ -13,16 +13,16 @@ If you've modded KotOR before, you know the drill: KotOR Tool to extract files, 
 
 - **Write and compile NWScript** with syntax highlighting, autocomplete from `nwscript.nss`, and a built-in compiler — no Wine, no external binaries needed.
 - **Build conversations visually** in a node-graph dialogue editor with full `.dlg` round-trip — open any stock or modded dialogue, edit it, save it back.
-- **Scaffold quests** from templates that generate the global variables, journal states, and script stubs with correct community naming conventions.
+- **Scaffold quests** from templates that generate globals, journal states, and real compileable script files with legal ResRefs.
 - **Edit 2DA tables and dialog.tlk** in place, with one-click TSLPatcher `changes.ini` export.
 - **Browse your game's files without extracting anything** — the Asset Library reads BIF/ERF/RIM archives directly, with texture previews.
 - **Export with confidence** — straight to Override for testing, or packed into a proper ERF/MOD for distribution.
 
 It also ships a **Model Context Protocol (MCP) server with 60 tools**, so AI assistants like Claude Desktop or Cursor can read, analyze, and write KotOR game assets alongside you. That part is entirely optional — the GUI works fine without it.
 
-> **Latest release — v3.6.1:** all binary writers cross-checked against PyKotor and retail game
-> data; fixed ERF resource-type IDs, journal (JRL) game compatibility, and dialogue text
-> encoding. Full history in [CHANGELOG.md](CHANGELOG.md).
+> **Integrity audit — 2026-07-10:** critical read/write paths were checked against public
+> reverse-engineering projects and clean K1/K2 retail data. See [AUDIT_REPORT.md](AUDIT_REPORT.md)
+> for verified behavior, source provenance, fixes, and remaining limitations.
 
 ---
 
@@ -107,13 +107,13 @@ Click **+ Project** in the toolbar. Give it a name (`TestQuest`), pick your targ
 
 Click **+ New Quest** in the sidebar → choose **Simple Quest (3 states)** → name it `relic`.
 
-(Why such a short name? Generated script names follow the pattern `k_swg_<name>_<state>`, and KotOR truncates anything over 16 characters — a rule you'll meet again in this tutorial.)
+(A short name keeps generated ResRefs readable. GhostScripter deterministically shortens longer names so they remain within KotOR's 16-character limit.)
 
-The Quest Builder generates everything the quest needs, pre-named to community conventions:
+The Quest Builder generates and persists the scaffold using its legacy `K_SWG_`/`k_swg_` defaults. For a real release, replace that prefix with one unique to your mod:
 
 - Two global variables: `K_SWG_RELIC` (Boolean) and `K_SWG_RELIC_STATE` (Number)
 - Three journal states: *Not Started → Active → Complete*
-- One script stub per state: `k_swg_relic_00`, `k_swg_relic_01`, `k_swg_relic_02`
+- One real `.nss` script per state: `k_swg_relic_00`, `k_swg_relic_01`, `k_swg_relic_02`
 
 Look through the **Overview**, **Variables**, **States**, and **Scripts** tabs to see what it made.
 
@@ -135,7 +135,7 @@ A few editor features worth noticing while you type:
 - The function reference sidebar shows full signatures — double-click to insert.
 - The static checker catches classic mistakes: `int oPC` instead of `object oPC`, script names longer than KotOR's 16-character limit, unbalanced braces.
 
-Click **⚙ Compile → NCS**. The built-in compiler (pure Python, via PyKotor) produces the `.ncs` binary the game runs. No setup required; if you happen to have `nwnnsscomp.exe`, it's used as a fallback automatically.
+Click **⚙ Compile → NCS**. The built-in compiler (pure Python, via PyKotor) produces the `.ncs` binary the game runs. A separately installed `nwnnsscomp` on `PATH` is an optional fallback; repository legacy executables are not auto-run.
 
 ### Step 4 — Register the quest variables
 
@@ -183,15 +183,15 @@ Enable the cheat console (add `EnableCheats=1` under `[Game Options]` in `swkoto
 
 A quick tour of each tool in the IDE. They all read from your project and your loaded game installation.
 
-**Script Editor** — NWScript editing with full syntax highlighting, line numbers, autocomplete (`Ctrl+Space`), a searchable function-reference sidebar, and `void main()` / `StartingConditional()` templates. Compiles to `.ncs` with the built-in PyKotor compiler (cross-platform, no external tools) and decompiles existing `.ncs` binaries back to readable source.
+**Script Editor** — NWScript editing with full syntax highlighting, line numbers, autocomplete (`Ctrl+Space`), a searchable function-reference sidebar, and `void main()` / `StartingConditional()` templates. Compiles to `.ncs` with the built-in PyKotor compiler. NCS source reconstruction is best-effort; the tool always returns disassembly and labels reconstructed source as verified only after an exact recompile.
 
 **Dialogue Editor** — node-graph view of `.dlg` conversations. NPC lines and player replies are draggable nodes; branches carry conditional scripts; the Inspector exposes the full field set (voice-over refs, camera fields, TSL-specific extras). Round-trips any stock or modded dialogue. **Validate** catches broken branch targets, empty nodes, and over-long script names before the game silently misbehaves.
 
-**Quest Builder** — three templates (Simple 3-state, Branching Light/Dark, NPC Companion) that generate globals, states, script stubs, and copy-ready `globalcat.2da` rows following `K_SWG_` naming conventions.
+**Quest Builder** — three templates (Simple 3-state, Branching Light/Dark, NPC Companion) that persist quest data, generate real `.nss` files, and produce copy-ready `globalcat.2da` rows. `K_SWG_` is a legacy GhostScripter default, not a universal community prefix.
 
 **2DA Manager** — spreadsheet editing for the game's data tables: inline cells, add/delete rows and columns, live search, and TSLPatcher-style operations (`AddRow`, `CopyRow`, `ModifyRow`, `ColumnAdd`) with one-click `changes.ini` export.
 
-**TLK Editor** — search and edit all ~49,000 entries of `dialog.tlk`, jump by StrRef, and save byte-accurate binaries. Loads alongside the Dialogue Editor so node cards show real text for StrRef-based lines.
+**TLK Editor** — search and edit `dialog.tlk`, jump by StrRef, and save byte-accurate binaries. The audited English Steam files contain 49,265 K1 entries and 136,329 K2 entries.
 
 **Journal Editor** — browse and edit quest categories and journal entries in `.jrl` files, and save back to game-ready binary.
 
@@ -278,19 +278,19 @@ Plus legacy unprefixed aliases for the four `gs*` tools. Every tool returns JSON
 
 </details>
 
-**Works without a game installation:** NWScript lookup (772 K1 / 812 K2 functions), script compile/decompile, static analysis, and all the write tools. Everything that *reads* game data needs a loaded installation.
+**Works without a game installation:** NWScript lookup (772 K1 / 877 K2 functions), script compile/decompile, static analysis, and write tools. Installation-backed reads need a loaded game path.
 
 ---
 
 ## KotOR Modding Conventions
 
-GhostScripter follows and enforces the community conventions used across Deadly Stream mods:
+GhostScripter enforces engine constraints and offers conservative project defaults. Prefixes are examples; mod authors should choose a unique prefix for their own project.
 
 | Convention | Rule | Example |
 |---|---|---|
-| Global variable names | `K_SWG_` prefix, ALL_CAPS | `K_SWG_MYQUEST_STATE` |
-| Quest IDs | `k_swg_` prefix, lowercase | `k_swg_retrieve_artifact` |
-| Script names | `k_` prefix, lowercase, **≤ 16 chars** | `k_swg_retrieve_01` |
+| Global variable names | Unique, consistent, and registered in `globalcat.2da` | `MYMOD_QUEST_STATE` |
+| Quest IDs | Project-defined stable identifier | `mymod_relic` |
+| Script names | Unique project prefix and **≤ 16 chars** | `mm_relic_start` |
 | ResRef length | Max 16 ASCII characters | `k_mir_debt_st` ✓ |
 | NPC tags | Lowercase with underscores | `k_npc_questgiver` |
 
@@ -314,7 +314,7 @@ And remember: every global your scripts touch needs a `globalcat.2da` row, or th
 
 **Which files can I safely put in Override?** Any resource the game looks up by name: `.ncs`, `.dlg`, `.2da`, `.utc`/`.uti`/… blueprints, `.jrl`, textures. Module-level files (`.mod`/`.rim`/`.erf`) go in `Modules/` instead.
 
-**Decompiled scripts look suspiciously empty.** NCS decompilation is best-effort — for complex control flow the decompiler can drop code. Treat decompiled source as a starting point, not gospel; the original DeNCS remains the community gold standard.
+**Decompiled scripts look suspiciously empty.** NCS source reconstruction is best-effort. GhostScripter now returns authoritative disassembly alongside it and marks source unverified when recompilation differs. Never replace an original NCS from an unverified reconstruction.
 
 ---
 

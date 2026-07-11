@@ -3,7 +3,7 @@ GhostScripter-K1-K2 — Quest Builder Widget
 """
 from __future__ import annotations
 
-
+from pathlib import Path
 
 from qtpy.QtCore import Qt
 from qtpy.QtGui import QColor, QFont
@@ -18,11 +18,8 @@ from qtpy.QtWidgets import (
 
 from ghostscripter.core.models.quest import (
     QuestDefinition, GlobalVariable, QuestState, QuestTrigger,
-    QUEST_TEMPLATES, create_quest_from_template,
-)
-from ghostscripter.core.models.script import (
-    ScriptFile, make_quest_start_template, make_quest_complete_template,
-    make_quest_check_template,
+    QUEST_TEMPLATES, create_quest_from_template, generate_quest_script_files,
+    make_quest_script_resref,
 )
 from ghostscripter.core.constants import VAR_TYPES, QUEST_TYPES
 
@@ -254,7 +251,7 @@ class QuestBuilderWidget(QWidget):
         lay.setContentsMargins(8, 8, 8, 8)
         lay.setSpacing(6)
 
-        lay.addWidget(QLabel("Generated Script Stubs"))
+        lay.addWidget(QLabel("Quest Script Files"))
 
         self.scripts_list = QListWidget()
         self.scripts_list.setStyleSheet("""
@@ -264,7 +261,7 @@ class QuestBuilderWidget(QWidget):
         """)
         lay.addWidget(self.scripts_list)
 
-        gen_btn = QPushButton("Generate Script Stubs")
+        gen_btn = QPushButton("Generate Script Files")
         gen_btn.setStyleSheet("""
             QPushButton { background:#0078d4; color:white; border:1px solid #1a8fe0;
                           border-radius:3px; padding:5px 14px; font-weight:bold; }
@@ -378,7 +375,21 @@ class QuestBuilderWidget(QWidget):
         self.quest.quest_type = self.ov_type.currentText()
         self.quest.description = self.ov_desc.toPlainText()
         self._load_quest(self.quest)
-        QMessageBox.information(self, "Saved", "Quest overview updated.")
+        if self.project:
+            try:
+                self._persist_current_quest()
+            except Exception as exc:
+                QMessageBox.critical(
+                    self, "Quest Save Failed", f"Could not save the quest:\n{exc}",
+                )
+                return
+            QMessageBox.information(self, "Saved", "Quest overview saved to the project.")
+        else:
+            QMessageBox.information(
+                self,
+                "Updated",
+                "Quest overview updated in this editor. Open or create a project to save it.",
+            )
 
     def _add_variable(self):
         if not self.quest:
@@ -414,14 +425,72 @@ class QuestBuilderWidget(QWidget):
         if not self.quest:
             QMessageBox.warning(self, "No Quest", "No quest loaded.")
             return
-        self.quest.scripts.clear()
-        for state in self.quest.states:
-            script_name = f"{self.quest.quest_id}_{state.state_id:02d}"
-            self.quest.scripts.append(script_name)
+        if not self.project or not self.project.script_dir:
+            QMessageBox.warning(
+                self,
+                "Project Required",
+                "Open or create a project before generating scripts. "
+                "GhostScripter will not claim files were generated without a save location.",
+            )
+            return
+
+        try:
+            prior_paths = {
+                str((self.project.script_dir / f"{name}.nss").resolve())
+                for name in (
+                    make_quest_script_resref(self.quest.quest_id, state.state_id)
+                    for state in self.quest.states
+                )
+                if (self.project.script_dir / f"{name}.nss").exists()
+            }
+            generated = generate_quest_script_files(
+                self.quest, self.project.script_dir, overwrite=False,
+            )
+
+            # Keep any live editor models (which may contain unsaved changes)
+            # and add only genuinely new files to the project collection.
+            known_paths = {
+                str(Path(script.file_path).resolve()): script
+                for script in self.project.scripts
+                if getattr(script, "file_path", None)
+            }
+            for script in generated:
+                key = str(Path(script.file_path).resolve())
+                if key not in known_paths:
+                    self.project.scripts.append(script)
+                    known_paths[key] = script
+            self._persist_current_quest()
+        except Exception as exc:
+            QMessageBox.critical(
+                self, "Script Generation Failed", f"Could not generate scripts:\n{exc}",
+            )
+            return
+
         self._load_quest(self.quest)
+        preserved = sum(
+            1 for script in generated
+            if str(Path(script.file_path).resolve()) in prior_paths
+        )
+        created = len(generated) - preserved
         QMessageBox.information(self, "Scripts Generated",
-            f"Generated {len(self.quest.scripts)} script stubs.\n"
-            f"Open each in the Script Editor to add logic.")
+            f"Created {created} compileable .nss file(s) in:\n"
+            f"{self.project.script_dir}\n\n"
+            f"Preserved {preserved} existing file(s) without overwriting them.\n"
+            "The quest definition was saved to the project.")
+
+    def _persist_current_quest(self):
+        if not self.project or not self.quest:
+            raise ValueError("A project and quest are required")
+        if not any(item is self.quest for item in self.project.quests):
+            # Replace a stale model with the same stable ID; otherwise add it.
+            for index, item in enumerate(self.project.quests):
+                if item.quest_id and item.quest_id == self.quest.quest_id:
+                    self.project.quests[index] = self.quest
+                    break
+            else:
+                self.project.quests.append(self.quest)
+        self.project.save_quest(self.quest)
+        self.project.save()
 
     def _validate(self):
         if not self.quest:
@@ -435,9 +504,19 @@ class QuestBuilderWidget(QWidget):
             issues.append("No global variables defined")
         if not self.quest.states:
             issues.append("No quest states defined")
+        state_ids = [state.state_id for state in self.quest.states]
+        if len(state_ids) != len(set(state_ids)):
+            issues.append("Quest state IDs must be unique")
+        if any(state_id < 0 for state_id in state_ids):
+            issues.append("Quest state IDs must be non-negative")
         for v in self.quest.variables:
-            if not v.variable_name.startswith("K_SWG_"):
-                issues.append(f"Variable '{v.variable_name}' does not follow K_SWG_ convention")
+            if not v.variable_name or not all(
+                char.isascii() and (char.isalnum() or char == "_")
+                for char in v.variable_name
+            ):
+                issues.append(
+                    f"Variable '{v.variable_name}' must contain only letters, numbers, and underscores"
+                )
         if issues:
             QMessageBox.warning(self, "Validation Issues",
                                  "\n".join(f"• {i}" for i in issues))

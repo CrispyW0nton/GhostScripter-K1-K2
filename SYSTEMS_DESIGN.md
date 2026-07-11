@@ -1,5 +1,9 @@
 # Ghostworks Pipeline — Systems Design
 
+> **Design/history document, not a retail-data authority.** Example globals,
+> module IDs, payloads, and completed checkboxes illustrate intended flows. Use
+> [AUDIT_REPORT.md](AUDIT_REPORT.md) for verified format behavior and provenance.
+
 > Applied from: *Structured Design* by Edward Yourdon & Larry L. Constantine  
 > The **Ghostworks Pipeline** is the "Unreal Engine of KotOR modding" — three tightly-integrated
 > tools that together cover every step of the mod creation workflow.

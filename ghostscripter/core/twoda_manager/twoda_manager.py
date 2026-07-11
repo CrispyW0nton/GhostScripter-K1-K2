@@ -484,6 +484,7 @@ class TwoDAFile:
     def add_column(self, name: str, default: str = "****"):
         """Add a new column (TSLPatcher ColumnAdd)."""
         if name not in self.columns:
+            self._save_state()
             self.columns.append(name)
             for row in self.rows:
                 row.data.setdefault(name, default)
@@ -546,29 +547,71 @@ class TwoDAFile:
         Generate a changes.ini-style patch that transforms original → self.
         This is the TSLPatcher format used for mod distribution.
         """
-        lines = [f"[{self.filename}]"]
-        for row_idx, row in enumerate(self.rows):
-            if row_idx >= len(original.rows):
-                # New row → AddRow
-                cells = ", ".join(
-                    f"{col}={val}" for col, val in row.data.items()
-                    if val != "****"
+        if len(self.rows) < len(original.rows):
+            raise ValueError(
+                "TSLPatcher 2DAList has no DeleteRow operation; export a replacement "
+                "2DA or restore deleted rows."
+            )
+        for index, original_row in enumerate(original.rows):
+            if self.rows[index].label != original_row.label:
+                raise ValueError(
+                    "TSLPatcher cannot safely express reordered or renamed existing "
+                    f"row labels (first mismatch at row {index})."
                 )
-                lines.append(f"AddRow {row_idx}={cells}")
-            else:
-                orig_row = original.rows[row_idx]
-                diffs = {
-                    col: val for col, val in row.data.items()
-                    if val != orig_row.data.get(col, "****")
-                }
-                if diffs:
-                    cells = ", ".join(f"{col}={val}" for col, val in diffs.items())
-                    lines.append(f"ChangeRow {row_idx}={cells}")
-        # New columns
-        for col in self.columns:
-            if col not in original.columns:
-                lines.append(f"AddColumn {col}=****")
-        return "\n".join(lines)
+
+        filename = Path(self.filename).name
+        section_prefix = re.sub(r"[^A-Za-z0-9_]", "_", Path(filename).stem)
+        operations: list[str] = []
+        sections: list[list[str]] = []
+
+        new_columns = [col for col in self.columns if col not in original.columns]
+        for operation_index, column in enumerate(new_columns):
+            section = f"{section_prefix}_add_column_{operation_index}"
+            operations.append(f"AddColumn{operation_index}={section}")
+            body = [f"[{section}]", f"ColumnLabel={column}", "DefaultValue=****"]
+            for row_index in range(len(original.rows)):
+                value = self.rows[row_index].data.get(column, "****")
+                if value != "****":
+                    body.append(f"I{row_index}={value}")
+            sections.append(body)
+
+        change_index = 0
+        for row_index, original_row in enumerate(original.rows):
+            row = self.rows[row_index]
+            diffs = [
+                (column, row.data.get(column, "****"))
+                for column in original.columns
+                if row.data.get(column, "****")
+                != original_row.data.get(column, "****")
+            ]
+            if not diffs:
+                continue
+            section = f"{section_prefix}_change_row_{change_index}"
+            operations.append(f"ChangeRow{change_index}={section}")
+            body = [f"[{section}]", f"RowIndex={row_index}"]
+            body.extend(f"{column}={value}" for column, value in diffs)
+            sections.append(body)
+            change_index += 1
+
+        add_index = 0
+        for row in self.rows[len(original.rows):]:
+            section = f"{section_prefix}_add_row_{add_index}"
+            operations.append(f"AddRow{add_index}={section}")
+            body = [f"[{section}]", f"RowLabel={row.label}"]
+            body.extend(
+                f"{column}={row.data.get(column, '****')}"
+                for column in self.columns
+                if row.data.get(column, "****") != "****"
+            )
+            sections.append(body)
+            add_index += 1
+
+        lines = ["[2DAList]", f"Table0={filename}", "", f"[{filename}]"]
+        lines.extend(operations)
+        for section in sections:
+            lines.append("")
+            lines.extend(section)
+        return "\n".join(lines) + "\n"
 
     # ── Binary I/O ────────────────────────────────────────────
 

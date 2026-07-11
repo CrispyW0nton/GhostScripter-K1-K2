@@ -332,7 +332,7 @@ class TwoDAManagerWidget(QWidget):
         hdr_lay.addWidget(lbl)
 
         self.source_combo = QComboBox()
-        self.source_combo.addItem("Demo", "demo")
+        self.source_combo.addItem("Examples (not retail data)", "demo")
         self.source_combo.setStyleSheet("""
             QComboBox { background:#3c3c3c; color:#cccccc; border:1px solid #555;
                         border-radius:3px; padding:1px 6px; }
@@ -474,7 +474,7 @@ class TwoDAManagerWidget(QWidget):
                 item = QListWidgetItem(name)
                 item.setData(Qt.UserRole, ("demo", name))
                 self.file_list.addItem(item)
-            self.file_count_label.setText(f"{self.file_list.count()} demo files")
+            self.file_count_label.setText(f"{self.file_list.count()} example files")
         elif source == "game":
             self._populate_game_list()
 
@@ -499,9 +499,9 @@ class TwoDAManagerWidget(QWidget):
 
     def _load_demo_files(self):
         demos = {
-            "globalcat.2da": SAMPLE_GLOBALCAT_TEXT,
-            "appearance.2da": SAMPLE_APPEARANCE_TEXT,
-            "spells.2da": SAMPLE_SPELLS_TEXT,
+            "example_globalcat.2da": SAMPLE_GLOBALCAT_TEXT,
+            "example_appearance.2da": SAMPLE_APPEARANCE_TEXT,
+            "example_spells.2da": SAMPLE_SPELLS_TEXT,
         }
         for name, text in demos.items():
             f = TwoDAFile.from_text(text, name)
@@ -509,7 +509,7 @@ class TwoDAManagerWidget(QWidget):
             item = QListWidgetItem(name)
             item.setData(Qt.UserRole, ("demo", name))
             self.file_list.addItem(item)
-        self.file_count_label.setText(f"{len(demos)} demo files")
+        self.file_count_label.setText(f"{len(demos)} example files")
 
         # Also check project 2DA dir
         if self.project:
@@ -741,7 +741,7 @@ class TwoDAManagerWidget(QWidget):
         item = self.table.item(row, col)
         if item and 0 <= row < len(self.current_file.rows):
             col_name = self.current_file.columns[col - 1]
-            self.current_file.rows[row].data[col_name] = item.text()
+            self.current_file.set_cell_by_index(row, col_name, item.text())
 
     # ── Row Operations ────────────────────────────────────────
 
@@ -1030,14 +1030,14 @@ class TwoDAManagerWidget(QWidget):
 
         Returns True if the row was visible in the current table.
         """
-        if not hasattr(self, "table_widget") or self.table_widget is None:
+        if not hasattr(self, "table") or self.table is None:
             return False
-        row_count = self.table_widget.rowCount()
+        row_count = self.table.rowCount()
         if row_count == 0 or row_index < 0:
             return False
         target = min(row_index, row_count - 1)
-        self.table_widget.selectRow(target)
-        item = self.table_widget.item(target, 0)
+        self.table.selectRow(target)
+        item = self.table.item(target, 0)
         if item:
-            self.table_widget.scrollToItem(item)
+            self.table.scrollToItem(item)
         return True

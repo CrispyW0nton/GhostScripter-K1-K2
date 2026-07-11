@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import logging
 import struct
+from copy import deepcopy
 from enum import IntEnum
 from pathlib import Path
 
@@ -63,6 +64,10 @@ from enum import IntEnum as _IntEnum  # used by ERFWriter below
 
 # ── DLG Exporter ──────────────────────────────────────────────
 
+class DLGFidelityError(ValueError):
+    """Saving would discard fields from an imported dialogue."""
+
+
 class DLGExporter:
     """
     Convert a DialogueFile to GFF3 binary (.dlg).
@@ -76,6 +81,30 @@ class DLGExporter:
 
     def export(self, dlg: DialogueFile, target_game: str = "K1") -> bytes:
         """Return GFF3 binary bytes for the .dlg file."""
+        game = str(target_game or "K1").upper()
+        if game not in {"K1", "K2"}:
+            raise ValueError("target_game must be 'K1' or 'K2'")
+
+        # Imported TSL files carry fields that have no K1 equivalent.  Treat
+        # their source schema as authoritative so a stale UI/project selector
+        # cannot silently downgrade and strip them.
+        if getattr(dlg, "source_game", None) == "K2" and game != "K2":
+            log.warning(
+                "Imported K2 DLG requested as K1; retaining K2 schema to "
+                "protect source-only fields."
+            )
+            game = "K2"
+
+        if getattr(dlg, "_raw_gff", None) is not None:
+            return self._export_preserving_source(dlg, game)
+        unsupported = getattr(dlg, "_unsupported_fidelity_fields", [])
+        if unsupported:
+            details = "; ".join(unsupported)
+            raise DLGFidelityError(
+                "Cannot safely save this imported DLG: its complete typed "
+                f"source structure is unavailable ({details}). No file was written."
+            )
+
         w = GFF3Writer("DLG ")
         r = w.root
 
@@ -94,21 +123,21 @@ class DLGExporter:
         r.add_byte("UnequipItems",   1 if dlg.unequip_items else 0)
         r.add_byte("UnequipHItem",   1 if dlg.unequip_h_item else 0)
 
-        if target_game == "K2":
+        if game == "K2":
             r.add_dword("NumWords", dlg.word_count)
 
         # EntryList
-        entry_structs = [self._make_node_struct(e, "entry", target_game)
+        entry_structs = [self._make_node_struct(e, "entry", game)
                          for e in dlg.entries]
         r.add_list("EntryList", entry_structs)
 
         # ReplyList
-        reply_structs = [self._make_node_struct(rp, "reply", target_game)
+        reply_structs = [self._make_node_struct(rp, "reply", game)
                          for rp in dlg.replies]
         r.add_list("ReplyList", reply_structs)
 
         # StartingList — links into EntryList
-        starter_structs = [self._make_link_struct(b, target_game)
+        starter_structs = [self._make_link_struct(b, game)
                            for b in dlg.starters]
         r.add_list("StartingList", starter_structs)
 
@@ -210,13 +239,245 @@ class DLGExporter:
 
     def _make_link_struct(self, branch: DialogueBranch, game: str) -> GFFStruct:
         s = GFFStruct(0)
-        s.add_dword("Index",  max(0, branch.target_node_id))
+        # An explicit END link is encoded as unsigned DWORD 0xFFFFFFFF.  Do
+        # not clamp it to Entry/Reply 0: that silently changes dialogue flow.
+        target = 0xFFFFFFFF if branch.target_node_id < 0 else branch.target_node_id
+        s.add_dword("Index", target)
         s.add_resref("Active", branch.active_script or "")
         s.add_byte("IsChild",  1 if branch.is_child else 0)
+        s.add_cexo("LinkComment", branch.link_comment or "")
         if game == "K2":
             s.add_resref("Active2", branch.active_script2 or "")
             s.add_byte("DisplayInactive", 1 if branch.display_inactive else 0)
         return s
+
+    # ── Fidelity-preserving imported-DLG path ───────────────────
+
+    def _export_preserving_source(self, dlg: DialogueFile, game: str) -> bytes:
+        """Overlay model edits onto a typed copy of an imported GFF.
+
+        Reconstructing a stock K2 DLG solely from the editor model loses
+        StuntList, owner/VO metadata and conditional-link parameters that the
+        UI does not expose.  This path keeps the complete source tree and only
+        replaces the three structural lists with copies of their original
+        structs plus the user's modeled edits.
+        """
+        try:
+            from pykotor.resource.formats.gff import bytes_gff  # type: ignore
+            from pykotor.resource.formats.gff.gff_data import GFFList  # type: ignore
+            from pykotor.common.misc import ResRef  # type: ignore
+        except Exception as exc:  # pragma: no cover - dependency is packaged
+            raise DLGFidelityError(
+                "Cannot safely save this imported DLG because PyKotor's typed "
+                f"GFF writer is unavailable ({exc}). No file was written."
+            ) from exc
+
+        source_gff = deepcopy(dlg._raw_gff)
+        root = source_gff.root
+        source_state = dlg._source_state
+
+        def changed(label: str, value: Any) -> bool:
+            return not source_state or source_state.get(label, object()) != value
+
+        # Overlay modeled top-level values while leaving every other root
+        # field (including StuntList) untouched.
+        if changed("EndConversation", dlg.on_end or ""):
+            root.set_resref("EndConversation", ResRef(dlg.on_end or ""))
+        if changed("EndConverAbort", dlg.on_abort or ""):
+            root.set_resref("EndConverAbort", ResRef(dlg.on_abort or ""))
+        if changed("Skippable", 1 if dlg.skippable else 0):
+            root.set_uint8("Skippable", 1 if dlg.skippable else 0)
+        if changed("DelayEntry", dlg.delay_entry):
+            root.set_uint32("DelayEntry", dlg.delay_entry)
+        if changed("DelayReply", dlg.delay_reply):
+            root.set_uint32("DelayReply", dlg.delay_reply)
+        if changed("AmbientTrack", dlg.ambient_track or ""):
+            root.set_resref("AmbientTrack", ResRef(dlg.ambient_track or ""))
+        if changed("AnimatedCut", 1 if dlg.animated_cut else 0):
+            root.set_uint8("AnimatedCut", 1 if dlg.animated_cut else 0)
+        if changed("CameraModel", dlg.camera_model or ""):
+            root.set_resref("CameraModel", ResRef(dlg.camera_model or ""))
+        if changed("ConversationType", dlg.conversation_type):
+            root.set_int32("ConversationType", dlg.conversation_type)
+        if changed("ComputerType", dlg.computer_type):
+            root.set_uint8("ComputerType", dlg.computer_type)
+        if changed("OldHitCheck", 1 if dlg.old_hit_check else 0):
+            root.set_uint8("OldHitCheck", 1 if dlg.old_hit_check else 0)
+        if changed("UnequipItems", 1 if dlg.unequip_items else 0):
+            root.set_uint8("UnequipItems", 1 if dlg.unequip_items else 0)
+        if changed("UnequipHItem", 1 if dlg.unequip_h_item else 0):
+            root.set_uint8("UnequipHItem", 1 if dlg.unequip_h_item else 0)
+        if game == "K2" and changed("NumWords", dlg.word_count):
+            root.set_uint32("NumWords", dlg.word_count)
+
+        entry_list = GFFList()
+        for node in dlg.entries:
+            entry_list.append(self._make_preserved_node(node, "entry", game))
+        root.set_list("EntryList", entry_list)
+
+        reply_list = GFFList()
+        for node in dlg.replies:
+            reply_list.append(self._make_preserved_node(node, "reply", game))
+        root.set_list("ReplyList", reply_list)
+
+        starting_list = GFFList()
+        for branch in dlg.starters:
+            starting_list.append(self._make_preserved_link(branch, game))
+        root.set_list("StartingList", starting_list)
+
+        try:
+            return bytes_gff(source_gff)
+        except Exception as exc:
+            raise DLGFidelityError(
+                f"PyKotor could not write the preserved DLG ({exc}). "
+                "No file was written."
+            ) from exc
+
+    def _make_preserved_node(self, node: DialogueNode,
+                             node_type: str, game: str):
+        from pykotor.resource.formats.gff.gff_data import (  # type: ignore
+            GFFList as PyGFFList,
+            GFFStruct as PyGFFStruct,
+        )
+
+        target = deepcopy(node._raw_gff) if node._raw_gff is not None else PyGFFStruct(0)
+        modeled = self._make_node_struct(node, node_type, game)
+        link_label = "RepliesList" if node_type == "entry" else "EntriesList"
+        self._overlay_internal_fields(
+            target, modeled, skip_labels={"AnimList", link_label},
+            source_values=node._source_state,
+        )
+
+        animations = PyGFFList()
+        for animation in node.animations:
+            raw_animation = (
+                deepcopy(animation._raw_gff)
+                if animation._raw_gff is not None else PyGFFStruct(0)
+            )
+            modeled_animation = GFFStruct(0)
+            modeled_animation.add_cexo("Participant", animation.participant)
+            modeled_animation.add_dword("Animation", animation.animation_id)
+            self._overlay_internal_fields(
+                raw_animation, modeled_animation,
+                source_values=animation._source_state,
+            )
+            animations.append(raw_animation)
+        if target.get_list("AnimList") is not None or node.animations:
+            target.set_list("AnimList", animations)
+
+        links = PyGFFList()
+        for branch in node.branches:
+            links.append(self._make_preserved_link(branch, game))
+        if target.get_list(link_label) is not None or node.branches:
+            target.set_list(link_label, links)
+        return target
+
+    def _make_preserved_link(self, branch: DialogueBranch, game: str):
+        from pykotor.resource.formats.gff.gff_data import GFFStruct as PyGFFStruct  # type: ignore
+
+        target = (
+            deepcopy(branch._raw_gff)
+            if branch._raw_gff is not None else PyGFFStruct(0)
+        )
+        self._overlay_internal_fields(
+            target, self._make_link_struct(branch, game),
+            source_values=branch._source_state,
+        )
+        return target
+
+    @staticmethod
+    def _overlay_internal_fields(target, modeled: GFFStruct,
+                                 skip_labels: set[str] | None = None,
+                                 source_values: Dict[str, Any] | None = None) -> None:
+        """Apply fields from the internal GFFStruct to a PyKotor struct."""
+        from pykotor.common.language import (  # type: ignore
+            Gender, Language, LocalizedString,
+        )
+        from pykotor.common.misc import ResRef  # type: ignore
+        from pykotor.resource.formats.gff.gff_data import (  # type: ignore
+            GFFList as PyGFFList,
+            GFFStruct as PyGFFStruct,
+            Vector3,
+            Vector4,
+        )
+
+        skipped = skip_labels or set()
+        for label, field_type, value in modeled.fields:
+            if label in skipped:
+                continue
+            if source_values and source_values.get(label, object()) == value:
+                # The model value is exactly what was imported.  Leave the
+                # original field untouched, including its absence, type,
+                # localized substrings and insertion order.
+                continue
+            if field_type == GFFType.BYTE:
+                target.set_uint8(label, value)
+            elif field_type == GFFType.CHAR:
+                signed = value if value < 0x80 else value - 0x100
+                target.set_int8(label, signed)
+            elif field_type == GFFType.WORD:
+                target.set_uint16(label, value)
+            elif field_type == GFFType.SHORT:
+                target.set_int16(label, value)
+            elif field_type == GFFType.DWORD:
+                target.set_uint32(label, value)
+            elif field_type == GFFType.INT:
+                target.set_int32(label, value)
+            elif field_type == GFFType.DWORD64:
+                target.set_uint64(label, value)
+            elif field_type == GFFType.INT64:
+                target.set_int64(label, value)
+            elif field_type == GFFType.FLOAT:
+                target.set_single(label, value)
+            elif field_type == GFFType.DOUBLE:
+                target.set_double(label, value)
+            elif field_type == GFFType.CEXOSTRING:
+                target.set_string(label, value)
+            elif field_type == GFFType.RESREF:
+                target.set_resref(label, ResRef(value))
+            elif field_type == GFFType.CEXOLOCSTRING:
+                strref, text = value
+                existing = target.get_locstring(label)
+                locstring = (
+                    deepcopy(existing)
+                    if existing is not None else LocalizedString.from_invalid()
+                )
+                locstring.stringref = int(strref)
+
+                male = locstring.get(Language.ENGLISH, Gender.MALE)
+                female = locstring.get(Language.ENGLISH, Gender.FEMALE)
+                current_english = male if male is not None else (female or "")
+                if text != current_english:
+                    if male is not None:
+                        locstring.remove(Language.ENGLISH, Gender.MALE)
+                    elif female is not None:
+                        locstring.remove(Language.ENGLISH, Gender.FEMALE)
+                    if text:
+                        locstring.set_data(Language.ENGLISH, Gender.MALE, text)
+                target.set_locstring(label, locstring)
+            elif field_type == GFFType.VOID:
+                target.set_binary(label, value)
+            elif field_type == GFFType.VECTOR:
+                target.set_vector3(label, Vector3(*value))
+            elif field_type == GFFType.ORIENTATION:
+                w, x, y, z = value
+                target.set_vector4(label, Vector4(x, y, z, w))
+            elif field_type == GFFType.STRUCT:
+                child = PyGFFStruct(value.struct_type)
+                DLGExporter._overlay_internal_fields(child, value)
+                target.set_struct(label, child)
+            elif field_type == GFFType.LIST:
+                children = PyGFFList()
+                for item in value:
+                    child = PyGFFStruct(item.struct_type)
+                    DLGExporter._overlay_internal_fields(child, item)
+                    children.append(child)
+                target.set_list(label, children)
+            else:
+                raise DLGFidelityError(
+                    f"Cannot preserve unsupported GFF field type {field_type!r} "
+                    f"for {label!r}."
+                )
 
 
 # ── ERF / Override Exporter ────────────────────────────────────
@@ -298,7 +559,11 @@ class ERFWriter:
         for res_id, (resref, data) in enumerate(self.resources):
             stem  = Path(resref).stem[:16]
             ext   = Path(resref).suffix.lower()
-            rtype = self.RESTYPE_MAP.get(ext, 0)
+            if ext not in self.RESTYPE_MAP:
+                raise ValueError(
+                    f"Unknown KotOR resource extension {ext!r}; refusing to encode it as type 0."
+                )
+            rtype = self.RESTYPE_MAP[ext]
 
             key_list += stem.encode("ascii").ljust(16, b"\x00")
             key_list += struct.pack("<IHH", res_id, rtype, 0)

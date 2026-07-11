@@ -683,13 +683,18 @@ class TestNWScriptToolsOptionalGame(unittest.TestCase):
 
     def test_resref_over_16_chars_flagged(self) -> None:
         """compileSummary must flag ResRef strings exceeding 16 characters."""
-        source = 'void main() { string r = "this_is_way_too_long_resref"; }'
+        source = 'void main() { ExecuteScript("this_is_way_too_long_resref", OBJECT_SELF); }'
         result = self._call("compileSummary", {"source": source})
         issues = result.get("issues", [])
         self.assertTrue(
             any("resref" in i.lower() or "16" in i or "long" in i.lower() for i in issues),
             f"Expected ResRef-length issue, got: {issues}",
         )
+
+    def test_long_ordinary_string_is_not_mislabeled_as_resref(self) -> None:
+        source = 'void main() { string message = "this_is_ordinary_dialogue_text"; }'
+        result = self._call("compileSummary", {"source": source})
+        self.assertEqual(result.get("issues", []), [])
 
     def test_clean_source_has_no_issues(self) -> None:
         source = "void main() { AddJournalQuestEntry(\"my_quest\", 10, GetFirstPC()); }"
@@ -698,12 +703,18 @@ class TestNWScriptToolsOptionalGame(unittest.TestCase):
 
 
 class TestWriteGFF(unittest.TestCase):
-    def _call(self, file_type: str, fields: dict) -> dict:
+    def _call(self, file_type: str, fields: dict, *, allow_lossy: bool = True) -> dict:
         from ghostscripter.mcp.tools import handle_tool
         return _json(_run(handle_tool("writeGFF", {
             "fileType": file_type,
             "fields": fields,
+            "allowLossy": allow_lossy,
         })))
+
+    def test_ambiguous_untyped_fields_rejected_by_default(self):
+        result = self._call("UTC ", {"MaxHitPoints": 50}, allow_lossy=False)
+        self.assertIn("error", result)
+        self.assertIn("ambiguous", result["error"])
 
     def test_basic_gff_write(self):
         result = self._call("UTC ", {"FirstName": "Bastila", "MaxHitPoints": 50})
@@ -778,9 +789,9 @@ class TestModuleOverview(unittest.TestCase):
              patch("ghostscripter.mcp.tools_pkg.handlers_read._load_rm", return_value=rm), \
              patch("ghostscripter.mcp.tools_pkg.handlers_write._load_rm", return_value=rm), \
              patch("ghostscripter.mcp.tools_pkg.handlers_query._load_rm", return_value=rm), \
-             patch("ghostscripter.mcp.tools_pkg.handlers_composite._load_rm", return_value=rm):
+            patch("ghostscripter.mcp.tools_pkg.handlers_composite._load_rm", return_value=rm):
             result = _json(_run(tools.handle_tool("moduleOverview", {
-                "game": "K1", "moduleId": "nonexistent_module",
+                "game": "K1", "moduleId": "missing_mod",
             })))
         # Should not raise; returns overview with error field or empty counts
         self.assertIn("module_id", result)
@@ -1543,7 +1554,9 @@ class TestBugFixRegressions(unittest.TestCase):
     def test_gff_service_parse_bytes_roundtrip(self):
         """parse_bytes must produce a dict of GFF fields."""
         from ghostscripter.core.services import GFFService
-        raw = GFFService.write("UTC ", {"FirstName": "Bastila", "MaxHitPoints": 60})
+        raw = GFFService.write(
+            "UTC ", {"FirstName": "Bastila", "MaxHitPoints": 60}, allow_lossy=True
+        )
         self.assertIsInstance(raw, bytes)
         fields = GFFService.parse_bytes(raw)  # must not raise
         self.assertIsInstance(fields, dict)
@@ -1669,7 +1682,9 @@ class TestBugFixRegressions(unittest.TestCase):
         from ghostscripter.mcp.tools import _HANDLERS
         import ghostscripter.mcp.tools as tools_mod
 
-        raw = GFFService.write("UTC ", {"Tag": "TestNPC", "MaxHitPoints": 50})
+        raw = GFFService.write(
+            "UTC ", {"Tag": "TestNPC", "MaxHitPoints": 50}, allow_lossy=True
+        )
 
         mock_rm = MagicMock()
         mock_rm.read.return_value = raw
@@ -1831,15 +1846,15 @@ class TestWriteERF(unittest.TestCase):
             raw = base64.b64decode(data["data_base64"])
             self.assertEqual(raw[:4].decode("ascii"), atype, f"Header mismatch for {atype!r}")
 
-    def test_resref_truncated_to_16(self):
-        """ResRef names longer than 16 chars are silently truncated."""
+    def test_resref_over_16_is_rejected(self):
+        """ResRef names longer than 16 chars must not be silently truncated."""
         long_resref = "a" * 30
         result = self._run({
             "files": [{"resref": long_resref, "type": "nss", "data_b64": self._b64("//x")}],
         })
         data = json.loads(result[0].text)
-        self.assertNotIn("error", data)
-        self.assertEqual(len(data["files"][0].split(".")[0]), 16)
+        self.assertIn("error", data)
+        self.assertIn("16", data["error"])
 
     def test_empty_files_returns_error(self):
         """writeERF returns an error when files list is empty."""
@@ -1847,8 +1862,8 @@ class TestWriteERF(unittest.TestCase):
         data = json.loads(result[0].text)
         self.assertIn("error", data)
 
-    def test_invalid_base64_skipped_with_warning(self):
-        """File entries with invalid base64 are skipped and reported as warnings."""
+    def test_invalid_base64_is_rejected(self):
+        """Invalid base64 must fail rather than silently dropping an entry."""
         result = self._run({
             "files": [
                 {"resref": "good", "type": "nss", "data_b64": self._b64("void main(){}")},
@@ -1856,9 +1871,7 @@ class TestWriteERF(unittest.TestCase):
             ],
         })
         data = json.loads(result[0].text)
-        self.assertNotIn("error", data)
-        self.assertEqual(data["file_count"], 1)
-        self.assertIn("warnings", data)
+        self.assertIn("error", data)
 
     def test_new_tools_in_registry(self):
         """writeTwoDA and writeERF appear in TOOLS and _HANDLERS."""
@@ -3589,8 +3602,8 @@ class TestReadLIP(unittest.TestCase):
         self.assertEqual(data["keyframe_count"], 4)
         self.assertEqual(len(data["keyframes"]), 4)
         self.assertEqual(data["keyframes"][0]["shape_name"], "NEUTRAL")
-        self.assertEqual(data["keyframes"][1]["shape_name"], "AH")
-        self.assertEqual(data["keyframes"][2]["shape_name"], "FV")
+        self.assertEqual(data["keyframes"][1]["shape_name"], "AA_AE_AH")
+        self.assertEqual(data["keyframes"][2]["shape_name"], "F_V")
 
     def test_empty_keyframes_decoded(self):
         lip_data = self._make_lip(1.0, [])
@@ -3684,8 +3697,8 @@ class TestWriteLIP(unittest.TestCase):
         self.assertEqual(len(raw), 16)  # header only
 
     def test_all_shape_name_strings_accepted(self):
-        shapes = ["NEUTRAL", "EE", "EH", "AH", "OH", "OOH", "Y",
-                  "STS", "FV", "NG", "TH", "MPB", "TD", "SH", "L", "KG"]
+        from ghostscripter.core.lip import LIP_SHAPES
+        shapes = list(LIP_SHAPES)
         kf = [{"time": float(i) * 0.1, "shape": s} for i, s in enumerate(shapes)]
         result = _run(handle_tool("writeLIP", {"duration": 2.0, "keyframes": kf}))
         import json
@@ -3741,7 +3754,7 @@ class TestGetCreature(unittest.TestCase):
             "Conversation":     "bastila",
             "ScriptSpawn":      "k_hbas_spawn",
         }
-        return GFFService.write("UTC ", fields)
+        return GFFService.write("UTC ", fields, allow_lossy=True)
 
     def test_missing_utc_returns_error(self):
         rm = MagicMock()
@@ -4419,7 +4432,8 @@ class TestV32Additions(unittest.TestCase):
                     # Check SSF header
                     self.assertEqual(raw[:4], b"SSF ")
                     self.assertEqual(raw[4:8], b"V1.1")
-                    self.assertEqual(len(raw), 12 + 28 * 4)  # header + 28 int32s
+                    # New files use the 40-entry PyKotor/retail-compatible layout.
+                    self.assertEqual(len(raw), 12 + 40 * 4)
                     # Check slot 0 (BATTLE_CRY_1) = 100
                     slot0 = struct.unpack_from("<i", raw, 12)[0]
                     self.assertEqual(slot0, 100)
@@ -4468,13 +4482,11 @@ class TestV32Additions(unittest.TestCase):
                           f"getArea docstring missing field '{field}'")
 
     def test_writeSSF_slot_slot_name_mapping(self):
-        """writeSSF handler imports correctly and slot name list accessible."""
-        from ghostscripter.mcp.tools_pkg.handlers_write import _write_ssf
-        import inspect
-        src = inspect.getsource(_write_ssf)
-        self.assertIn("BATTLE_CRY_1", src)
-        self.assertIn("DEAD", src)
-        self.assertIn("POISONED", src)
+        """writeSSF uses the shared canonical SSF slot table."""
+        from ghostscripter.core.ssf import SSF_SLOT_NAMES
+        self.assertEqual(SSF_SLOT_NAMES[0], "BATTLE_CRY_1")
+        self.assertEqual(SSF_SLOT_NAMES[15], "DEAD")
+        self.assertEqual(SSF_SLOT_NAMES[27], "POISONED")
 
     def test_readPTH_handler_imports_correctly(self):
         """readPTH handler is importable from handlers_read."""
@@ -4852,7 +4864,13 @@ class TestV33Additions(unittest.TestCase):
         self.assertIn("resref", schema["required"])
 
     def test_readIFO_no_install_returns_error(self):
-        result = self._run("readIFO", {"game": "K1", "resref": "end_m01aa"})
+        # Isolate the no-install contract from installations cached by earlier
+        # integration tests on developer machines.
+        with patch(
+            "ghostscripter.mcp.tools_pkg.handlers_read._load_rm",
+            side_effect=FileNotFoundError("installation not loaded"),
+        ):
+            result = self._run("readIFO", {"game": "K1", "resref": "end_m01aa"})
         text = self._text(result)
         self.assertIn("error", text.lower())
 
@@ -5396,28 +5414,28 @@ class TestReadNCSDeep(unittest.TestCase):
         self.assertEqual(data["instructions"][0]["mnemonic"], "SAVEBP")
         self.assertEqual(data["instructions"][1]["mnemonic"], "RETN")
 
-    def test_readNCS_CPDOWNSP_reads_8_bytes(self):
-        """CPDOWNSP (0x01) reads 8 arg bytes: stack_offset(4) + size(4)."""
+    def test_readNCS_CPDOWNSP_reads_6_bytes(self):
+        """CPDOWNSP (0x01) reads stack_offset(int32) + size(uint16)."""
         import struct
         # CPDOWNSP: offset=-4, size=4
-        instr = bytes([0x01, 0x03]) + struct.pack(">i", -4) + struct.pack(">I", 4)
+        instr = bytes([0x01, 0x03]) + struct.pack(">i", -4) + struct.pack(">H", 4)
         ncs = self._make_ncs(instr)
         data = self._json(self._patched_run(ncs, {"game": "K1", "resref": "test"}))
         self.assertNotIn("error", data)
         self.assertEqual(data["instruction_count"], 1)
         self.assertEqual(data["instructions"][0]["mnemonic"], "CPDOWNSP")
-        self.assertEqual(len(data["instructions"][0]["args_hex"]), 16)  # 8 bytes → 16 hex chars
+        self.assertEqual(len(data["instructions"][0]["args_hex"]), 12)
 
-    def test_readNCS_DESTRUCT_reads_8_bytes(self):
-        """DESTRUCT (0x21) reads 8 arg bytes: stack_size(4)+dont_offset(2)+dont_size(2)."""
+    def test_readNCS_DESTRUCT_reads_6_bytes(self):
+        """DESTRUCT reads size(uint16)+offset(int16)+preserved-size(uint16)."""
         import struct
-        instr = bytes([0x21, 0x01]) + struct.pack(">I", 16) + struct.pack(">H", 4) + struct.pack(">H", 4)
+        instr = bytes([0x21, 0x01]) + struct.pack(">HhH", 16, 4, 4)
         ncs = self._make_ncs(instr)
         data = self._json(self._patched_run(ncs, {"game": "K1", "resref": "test"}))
         self.assertNotIn("error", data)
         self.assertEqual(data["instruction_count"], 1)
         self.assertEqual(data["instructions"][0]["mnemonic"], "DESTRUCT")
-        self.assertEqual(len(data["instructions"][0]["args_hex"]), 16)
+        self.assertEqual(len(data["instructions"][0]["args_hex"]), 12)
 
     def test_readNCS_unknown_opcode_labelled_UNK(self):
         """Unknown opcodes are labelled UNK_XX and consume 0 arg bytes."""

@@ -10,6 +10,7 @@ Usage
     python build_tools/build.py --clean      # remove dist/ and build/ only
     python build_tools/build.py --no-zip     # build but skip ZIP archive
     python build_tools/build.py --onefile    # single-file EXE (slower launch, easier distribute)
+    python build_tools/build.py --no-clean   # retain an earlier artefact in dist/
     python build_tools/build.py --debug      # console=True for traceback visibility
     python build_tools/build.py --version    # print resolved version and exit
 
@@ -72,7 +73,9 @@ def _log(msg: str, *, level: str = "INFO") -> None:
 
 def _run(cmd: list[str], *, cwd: Path | None = None, check: bool = True) -> int:
     _log(" ".join(str(c) for c in cmd), level="STEP")
-    result = subprocess.run(cmd, cwd=cwd or ROOT, check=check)
+    env = os.environ.copy()
+    env["PYTHONIOENCODING"] = "utf-8"
+    result = subprocess.run(cmd, cwd=cwd or ROOT, check=check, env=env)
     return result.returncode
 
 
@@ -121,6 +124,7 @@ def _pyinstaller(*, onefile: bool, debug: bool, version_file: Path | None) -> No
         # data files
         f"--add-data={ROOT / 'ghostscripter' / 'ui' / 'styles' / 'dark.qss'}{os.pathsep}ghostscripter/ui/styles",
         f"--add-data={ROOT / 'resources' / 'icons'}{os.pathsep}resources/icons",
+        f"--add-data={ROOT / 'resources' / 'scripts'}{os.pathsep}resources/scripts",
         f"--add-data={ROOT / 'README.md'}{os.pathsep}.",
         f"--add-data={ROOT / 'CREDITS.md'}{os.pathsep}.",
         # hooks
@@ -130,6 +134,11 @@ def _pyinstaller(*, onefile: bool, debug: bool, version_file: Path | None) -> No
         "--hidden-import=ghostscripter",
         "--hidden-import=ghostscripter.core",
         "--hidden-import=ghostscripter.core.constants",
+        "--hidden-import=ghostscripter.core.gff_codec",
+        "--hidden-import=ghostscripter.core.lip",
+        "--hidden-import=ghostscripter.core.ssf",
+        "--hidden-import=ghostscripter.core.services",
+        "--hidden-import=ghostscripter.core.nwscript.compiler_defs",
         "--hidden-import=ghostscripter.core.database.manager",
         "--hidden-import=ghostscripter.core.export.erf_writer",
         "--hidden-import=ghostscripter.core.export.dlg_writer",
@@ -138,9 +147,21 @@ def _pyinstaller(*, onefile: bool, debug: bool, version_file: Path | None) -> No
         "--hidden-import=ghostscripter.ui.main_window",
         "--hidden-import=ghostscripter.ui.widgets.script_editor_widget",
         "--hidden-import=ghostscripter.ui.widgets.dialogue_editor_widget",
+        "--hidden-import=ghostscripter.ui.widgets.lip_editor_widget",
         "--hidden-import=ghostscripter.ui.widgets.quest_builder_widget",
         "--hidden-import=ghostscripter.ui.widgets.twoda_manager_widget",
         "--hidden-import=ghostscripter.ui.widgets.asset_library_widget",
+        "--hidden-import=ghostscripter.mcp",
+        "--hidden-import=ghostscripter.mcp.__main__",
+        "--hidden-import=ghostscripter.mcp.server",
+        "--hidden-import=ghostscripter.mcp.tools",
+        "--hidden-import=ghostscripter.mcp.tools_pkg",
+        "--hidden-import=ghostscripter.mcp.tools_pkg._helpers",
+        "--hidden-import=ghostscripter.mcp.tools_pkg.handlers_composite",
+        "--hidden-import=ghostscripter.mcp.tools_pkg.handlers_query",
+        "--hidden-import=ghostscripter.mcp.tools_pkg.handlers_read",
+        "--hidden-import=ghostscripter.mcp.tools_pkg.handlers_write",
+        "--hidden-import=ghostscripter.mcp.tools_pkg.tool_defs",
         "--hidden-import=PyQt5",
         "--hidden-import=PyQt5.QtCore",
         "--hidden-import=PyQt5.QtGui",
@@ -155,6 +176,13 @@ def _pyinstaller(*, onefile: bool, debug: bool, version_file: Path | None) -> No
         "--hidden-import=sqlalchemy.dialects.sqlite",
         "--hidden-import=_sqlite3",
         "--hidden-import=sqlite3",
+        "--hidden-import=mcp.server.stdio",
+        "--hidden-import=mcp.server.sse",
+        "--hidden-import=mcp.server.streamable_http_manager",
+        "--hidden-import=pykotor.extract.savedata",
+        "--hidden-import=pykotor.resource.formats.ncs.compilers",
+        "--hidden-import=pykotor.resource.formats.ncs.decompiler",
+        "--hidden-import=pykotor.resource.generics.utc",
         # exclusions (keep bundle lean)
         "--exclude-module=tkinter",
         "--exclude-module=matplotlib",
@@ -254,12 +282,21 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument("--no-zip",   action="store_true", help="Skip creating ZIP archive")
     p.add_argument("--onefile",  action="store_true", help="Single-file EXE (slower startup)")
     p.add_argument("--debug",    action="store_true", help="Console-mode build (shows tracebacks)")
+    p.add_argument("--no-clean", action="store_true", help="Keep existing dist/build artefacts")
     p.add_argument("--version",  action="store_true", help="Print version and exit")
     return p.parse_args()
 
 
 def main() -> None:
     import time
+    # Windows runners and redirected desktop terminals may default to a legacy
+    # code page that cannot encode the progress glyphs used below.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            try:
+                stream.reconfigure(encoding="utf-8", errors="replace")
+            except (OSError, ValueError):
+                pass
     args = _parse_args()
 
     os.chdir(ROOT)   # ensure CWD is repo root
@@ -277,7 +314,8 @@ def main() -> None:
 
     t0 = time.monotonic()
 
-    _clean()
+    if not args.no_clean:
+        _clean()
     if args.clean:
         _log("--clean requested; stopping after clean.", level="OK")
         return

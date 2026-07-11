@@ -866,23 +866,13 @@ class ScriptEditorWidget(QWidget):
                         c_item.addChild(ci)
                     self.func_tree.addTopLevelItem(c_item)
         else:
-            # Fallback to hardcoded list from constants.py
-            from ghostscripter.core.constants import KOTOR_COMMON_FUNCTIONS
-            for category, funcs in KOTOR_COMMON_FUNCTIONS.items():
-                filtered = [f for f in funcs if not ft or ft in f["name"].lower()]
-                if not filtered:
-                    continue
-                cat_item = QTreeWidgetItem([category])
-                cat_item.setForeground(0, QColor("#dcdcaa"))
-                cat_item.setExpanded(True)
-                for func in filtered:
-                    sig = f"{func['name']}({', '.join(func['params'])})"
-                    f_item = QTreeWidgetItem([sig])
-                    f_item.setForeground(0, QColor("#9cdcfe"))
-                    f_item.setData(0, Qt.UserRole, {**func, "type": "function",
-                                                    "snippet": f"{func['name']}()"})
-                    cat_item.addChild(f_item)
-                self.func_tree.addTopLevelItem(cat_item)
+            # A missing official include is safer than hand-written signatures
+            # that can silently generate invalid scripts.
+            unavailable = QTreeWidgetItem([
+                "Official nwscript.nss database unavailable"
+            ])
+            unavailable.setForeground(0, QColor("#f48771"))
+            self.func_tree.addTopLevelItem(unavailable)
 
     def _filter_functions(self, text: str):
         self._populate_function_tree(text)
@@ -1356,19 +1346,11 @@ class ScriptEditorWidget(QWidget):
     def _find_compiler(self) -> str | None:
         """
         Locate nwnnsscomp for the current game.
-        Priority: bundled resources/tools/, PATH, working directory.
+        Search only user-installed compilers on PATH/working directory.  The
+        repository's legacy executables have no established provenance and are
+        deliberately never auto-executed.
         """
-        game = self._game.lower()  # "k1" or "k2"
-
-        # PyInstaller bundle or dev source
-        if getattr(sys, "frozen", False):
-            base = Path(sys._MEIPASS)   # type: ignore[attr-defined]
-        else:
-            base = Path(__file__).parent.parent.parent.parent
-
         candidates = [
-            base / "resources" / "tools" / f"nwnnsscomp_{game}.exe",
-            base / "resources" / "tools" / "nwnnsscomp.exe",
             Path("nwnnsscomp.exe"),
             Path("nwnnsscomp"),
         ]
@@ -1400,9 +1382,11 @@ class ScriptEditorWidget(QWidget):
         try:
             from pykotor.resource.formats.ncs.compilers import InbuiltNCSCompiler  # type: ignore[import]
             from pykotor.common.misc import Game  # type: ignore[import]
+            from ghostscripter.core.nwscript.compiler_defs import install_pykotor_definitions
             import shutil
 
             game_enum = Game.K1 if self._game.upper() == "K1" else Game.K2
+            install_pykotor_definitions(self._game)
             resref = self.script.name or self.script.file_path.stem
             ncs_path = self.script.file_path.with_suffix(".ncs")
 

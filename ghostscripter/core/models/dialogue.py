@@ -82,7 +82,13 @@ Link fields (inside RepliesList / EntriesList / StartingList struct):
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Set, Tuple
+from typing import Any, Dict, List, Set, Tuple
+
+
+# ``Index`` fields in DLG link structs are unsigned DWORDs.  BioWare uses
+# 0xFFFFFFFF as the on-disk sentinel for an explicit end-of-conversation link;
+# the editor model exposes that value as the much safer/saner Python value -1.
+END_NODE_ID = -1
 
 # ── Optional graph-analysis dependency ────────────────────────
 try:
@@ -99,6 +105,13 @@ class DLGAnimation:
     """AnimList entry: Participant + Animation ID."""
     participant: str = ""  # CEXOSTRING — NPC tag or "PLAYER"
     animation_id: int = 0  # DWORD — animation row from animations.2da
+    # Source GFF struct retained for lossless round-tripping of fields newer
+    # than this editor understands.  It is deliberately not part of equality
+    # or repr and is populated only for imported files.
+    _raw_gff: Any = field(default=None, repr=False, compare=False)
+    _source_state: Dict[str, Any] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
 
 
 # ── Link (branch connection) ──────────────────────────────────
@@ -128,6 +141,15 @@ class DialogueBranch:
     is_child: bool = False        # shared node reference
     link_comment: str = ""        # editor comment
     display_inactive: bool = False  # TSL
+    _raw_gff: Any = field(default=None, repr=False, compare=False)
+    _source_state: Dict[str, Any] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
+
+    @property
+    def is_end(self) -> bool:
+        """Whether this link explicitly terminates the conversation."""
+        return self.target_node_id < 0
 
     def describe(self) -> str:
         active = f" [if {self.active_script}]" if self.active_script else ""
@@ -265,6 +287,14 @@ class DialogueNode:
     # Editor comment
     comment: str = ""
 
+    # Original typed GFF struct, if this node came from an imported DLG.  The
+    # exporter overlays edited model fields onto a copy of this struct so K2
+    # and future/unknown fields are not discarded.
+    _raw_gff: Any = field(default=None, repr=False, compare=False)
+    _source_state: Dict[str, Any] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
+
     def short_text(self, max_len: int = 40, tlk=None) -> str:
         """Return a truncated display string for this node.
 
@@ -365,6 +395,19 @@ class DialogueFile:
     unequip_h_item: bool = False  # BYTE
     word_count: int = 0           # DWORD (TSL NumWords)
 
+    # Import provenance used by the fidelity-preserving writer.  ``source_game``
+    # also prevents an imported TSL dialogue from being accidentally rewritten
+    # through the K1 schema merely because a UI selector still says K1.
+    source_game: str | None = None
+    _raw_gff: Any = field(default=None, repr=False, compare=False)
+    _source_bytes: bytes | None = field(default=None, repr=False, compare=False)
+    _source_state: Dict[str, Any] = field(
+        default_factory=dict, repr=False, compare=False,
+    )
+    _unsupported_fidelity_fields: List[str] = field(
+        default_factory=list, repr=False, compare=False,
+    )
+
     # ── Unified node access (editor uses "nodes" list) ─────────
     # We keep entries/replies separate (matching GFF structure) but
     # expose a unified view for the graph editor.
@@ -382,15 +425,65 @@ class DialogueFile:
             node.node_id = len(self.entries)
             self.entries.append(node)
 
-    def remove_node(self, node_id: int):
-        """Remove a node by id from whichever list it lives in."""
-        self.entries = [n for n in self.entries if n.node_id != node_id]
-        self.replies = [n for n in self.replies if n.node_id != node_id]
-        # Clean up dangling branch references
-        for node in self.nodes:
-            node.branches = [
-                b for b in node.branches if b.target_node_id != node_id
-            ]
+    def remove_node(self, node_id: int, node_type: str | None = None):
+        """Remove exactly one typed DLG node and repair list-index links.
+
+        Entry and reply IDs occupy separate zero-based namespaces, so deleting
+        bare ID ``0`` must never delete both Entry 0 and Reply 0.  Existing
+        callers that omit *node_type* remain supported when the ID is
+        unambiguous; an ambiguous bare ID now raises a clear error instead of
+        silently destroying two nodes.
+
+        Since DLG branch targets are list indices, removing an item also shifts
+        all greater targets of the same type down by one and renumbers that
+        node list.  Links to the opposite node type are left untouched.
+        """
+        if node_type is None:
+            has_entry = self.get_entry(node_id) is not None
+            has_reply = self.get_reply(node_id) is not None
+            if has_entry and has_reply:
+                raise ValueError(
+                    f"Node ID {node_id} is ambiguous; pass node_type='entry' "
+                    "or node_type='reply'."
+                )
+            if not has_entry and not has_reply:
+                return
+            node_type = "entry" if has_entry else "reply"
+
+        node_type = node_type.lower().strip()
+        if node_type not in {"entry", "reply"}:
+            raise ValueError("node_type must be 'entry' or 'reply'")
+
+        def repair_links(branches: List[DialogueBranch]) -> List[DialogueBranch]:
+            repaired: List[DialogueBranch] = []
+            for branch in branches:
+                if branch.target_node_id == node_id:
+                    continue
+                if branch.target_node_id > node_id:
+                    branch.target_node_id -= 1
+                branch.branch_id = len(repaired)
+                repaired.append(branch)
+            return repaired
+
+        if node_type == "entry":
+            if self.get_entry(node_id) is None:
+                return
+            self.entries = [n for n in self.entries if n.node_id != node_id]
+            for new_id, node in enumerate(self.entries):
+                node.node_id = new_id
+            # Starters and reply branches target EntryList.
+            self.starters = repair_links(self.starters)
+            for reply in self.replies:
+                reply.branches = repair_links(reply.branches)
+        else:
+            if self.get_reply(node_id) is None:
+                return
+            self.replies = [n for n in self.replies if n.node_id != node_id]
+            for new_id, node in enumerate(self.replies):
+                node.node_id = new_id
+            # Entry branches target ReplyList.
+            for entry in self.entries:
+                entry.branches = repair_links(entry.branches)
 
     def get_node(self, node_id: int) -> DialogueNode | None:
         for n in self.nodes:

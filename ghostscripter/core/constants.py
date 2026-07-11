@@ -104,91 +104,13 @@ NWSCRIPT_KEYWORDS = [
     "void", "int", "float", "string", "object", "effect", "event",
     "location", "talent", "vector", "struct", "return", "if", "else",
     "for", "while", "do", "switch", "case", "break", "continue",
-    "default", "TRUE", "FALSE", "OBJECT_SELF", "OBJECT_INVALID",
-    "ACTION_INVALID", "LOCATION_INVALID"
+    "default", "const", "TRUE", "FALSE", "OBJECT_SELF", "OBJECT_INVALID",
+    "ACTION_INVALID"
 ]
 
+# KotOR/TSL NWScript types.  NWN:EE-only types must not be offered by the
+# editor because the two target game compilers do not accept them.
 NWSCRIPT_TYPES = [
     "void", "int", "float", "string", "object", "effect", "event",
-    "location", "talent", "vector", "struct", "action", "itemproperty",
-    "command", "json", "sqlquery", "cassowary"
+    "location", "talent", "vector", "struct", "action"
 ]
-
-# Common KotOR Functions
-KOTOR_COMMON_FUNCTIONS = {
-    "Quest / Global Variables": [
-        {"name": "SetGlobalNumber", "params": ["string sVarname", "int nValue"],
-         "returns": "void", "description": "Set a global number variable.",
-         "example": 'SetGlobalNumber("K_SWG_MYQUEST", 1);'},
-        {"name": "GetGlobalNumber", "params": ["string sVarname"],
-         "returns": "int", "description": "Get a global number variable.",
-         "example": 'int nState = GetGlobalNumber("K_SWG_MYQUEST");'},
-        {"name": "SetGlobalBoolean", "params": ["string sVarname", "int bValue"],
-         "returns": "void", "description": "Set a global boolean variable.",
-         "example": 'SetGlobalBoolean("K_SWG_QUEST_ACTIVE", TRUE);'},
-        {"name": "GetGlobalBoolean", "params": ["string sVarname"],
-         "returns": "int", "description": "Get a global boolean variable.",
-         "example": 'if (GetGlobalBoolean("K_SWG_QUEST_ACTIVE")) { }'},
-        {"name": "SetGlobalString", "params": ["string sVarname", "string sValue"],
-         "returns": "void", "description": "Set a global string variable.",
-         "example": 'SetGlobalString("K_SWG_PLAYER_CHOICE", "light");'},
-        {"name": "GetGlobalString", "params": ["string sVarname"],
-         "returns": "string", "description": "Get a global string variable.",
-         "example": 'string sChoice = GetGlobalString("K_SWG_PLAYER_CHOICE");'},
-    ],
-    "Object / NPC": [
-        {"name": "GetObjectByTag", "params": ["string sTag", "int nNthObject"],
-         "returns": "object", "description": "Get object by tag.",
-         "example": 'object oNPC = GetObjectByTag("k_npc_001", 0);'},
-        {"name": "CreateObject", "params": ["int nObjectType", "string sTemplate", "location lLocation", "int bUseAppearAnimation"],
-         "returns": "object", "description": "Create an object at location.",
-         "example": 'object oNew = CreateObject(OBJECT_TYPE_CREATURE, "k_npc_001", GetLocation(OBJECT_SELF));'},
-        {"name": "DestroyObject", "params": ["object oDestroy", "float fDelay"],
-         "returns": "void", "description": "Destroy an object.",
-         "example": 'DestroyObject(oNPC, 0.0f);'},
-        {"name": "GetIsObjectValid", "params": ["object oObject"],
-         "returns": "int", "description": "Check if object is valid.",
-         "example": 'if (GetIsObjectValid(oNPC)) { }'},
-        {"name": "GetTag", "params": ["object oObject"],
-         "returns": "string", "description": "Get an object tag.",
-         "example": 'string sTag = GetTag(oNPC);'},
-    ],
-    "Conversation / Dialogue": [
-        {"name": "BeginConversation", "params": ["string sResRef", "object oTarget"],
-         "returns": "void", "description": "Begin a dialogue with target.",
-         "example": 'BeginConversation("k_npc_dialogue", oNPC);'},
-        {"name": "ActionStartConversation", "params": ["object oObjectToConverse", "string sDialogResRef", "int bPrivateConversation"],
-         "returns": "void", "description": "Start a conversation action.",
-         "example": 'ActionStartConversation(oNPC, "k_dialogue_001", FALSE);'},
-    ],
-    "Party": [
-        {"name": "AddPartyMember", "params": ["int nNPC", "object oCreature"],
-         "returns": "int", "description": "Add NPC to party.",
-         "example": 'AddPartyMember(NPC_ATTON, oAtton);'},
-        {"name": "RemovePartyMember", "params": ["int nNPC"],
-         "returns": "void", "description": "Remove NPC from party.",
-         "example": 'RemovePartyMember(NPC_ATTON);'},
-        {"name": "IsObjectPartyMember", "params": ["object oCreature"],
-         "returns": "int", "description": "Check if object is party member.",
-         "example": 'if (IsObjectPartyMember(oNPC)) { }'},
-    ],
-    "Combat / Effects": [
-        {"name": "EffectDamage", "params": ["int nDamageAmount", "int nDamageType", "int nDamagePower"],
-         "returns": "effect", "description": "Create a damage effect.",
-         "example": 'effect eDmg = EffectDamage(10, DAMAGE_TYPE_BLUDGEONING, DAMAGE_POWER_NORMAL);'},
-        {"name": "ApplyEffectToObject", "params": ["int nDurationType", "effect eEffect", "object oTarget", "float fDuration"],
-         "returns": "void", "description": "Apply an effect to an object.",
-         "example": 'ApplyEffectToObject(DURATION_TYPE_INSTANT, eDmg, oEnemy, 0.0f);'},
-        {"name": "EffectHeal", "params": ["int nDamageToHeal"],
-         "returns": "effect", "description": "Create a healing effect.",
-         "example": 'ApplyEffectToObject(DURATION_TYPE_INSTANT, EffectHeal(20), oPC, 0.0f);'},
-    ],
-    "Alignment": [
-        {"name": "GetGoodEvilValue", "params": ["object oCreature"],
-         "returns": "int", "description": "Get Light/Dark side points (0-100).",
-         "example": 'int nAlign = GetGoodEvilValue(GetFirstPC());'},
-        {"name": "AdjustAlignment", "params": ["object oCreature", "int nAlignment", "int nShift", "int bAllPartyMembers"],
-         "returns": "void", "description": "Adjust creature alignment.",
-         "example": 'AdjustAlignment(GetFirstPC(), ALIGNMENT_LIGHT_SIDE, 10, FALSE);'},
-    ],
-}

@@ -1,5 +1,9 @@
 # GhostScripter-K1-K2 — Project Roadmap & Honest Audit
 
+> **Historical status snapshot.** Much of this file describes v3.4–v3.6 work and
+> is retained as project history; its checkboxes are not current compatibility
+> claims. The retail-backed 2026-07-10 assessment is [AUDIT_REPORT.md](AUDIT_REPORT.md).
+
 > **Repository**: https://github.com/CrispyW0nton/GhostScripter-K1-K2  
 > **Last audited**: 2026-03-20  
 > **Auditor**: Full source-code sweep — every handler, widget, parser, and reference repo
@@ -58,7 +62,7 @@ These 11 tools function immediately with no KotOR installation:
 | `nwscriptCategories` | Lists NWScript function categories |
 | `nwscriptSignature` | Returns full signature for any NWScript function |
 | `compileSummary` | Static analysis of .nss source (no compiler needed) |
-| `searchNWScript` | Search 772 K1 / 812 K2 NWScript functions by name |
+| `searchNWScript` | Search 772 K1 / 877 K2 NWScript functions by name |
 | `getNWScriptDB` | **NEW** — full NWScript DB dump (functions + constants) |
 | `compileScript` | **Now works** via InbuiltNCSCompiler (PyKotor) |
 | `writeGFF` | Builds GFF binary from a JSON fields dict |
@@ -99,7 +103,7 @@ GhostRigger's own capabilities (all working):
 - **TwoDA parser**: binary and ASCII 2DA read/write.
 - **TLK parser**: dialog.tlk StrRef lookup.
 - **LIP binary**: LIP V1.0 encode/decode.
-- **SSF binary**: SSF V1.1 28-slot encode/decode.
+- **SSF binary**: SSF V1.1 with 28 known semantic slots plus preserved retail trailing entries.
 - **NCS internal disassembler**: decodes NCS bytecode to instruction list (no PyKotor).
 - **PTH reader**: reads binary PTH + A* pathfinding (readPTH, pathfindRoute).
 - **LTR reader**: letter-frequency table read.
@@ -184,7 +188,7 @@ All the following were scanned during our three-phase deep scan:
 
 ### v3.4.1 (2026-03-19) — Deep Scan Phase 3 + decompileScript
 - ✅ `decompileScript` tool (#59): three-strategy chain (PyKotor decompile → PyKotor disassemble → Xoreos CLI)
-- ✅ `HARDCODED_MODULE_NAMES` dict: 70 entries from PyKotor + K2 entries
+- ❌ Historical `HARDCODED_MODULE_NAMES` catalogue was removed after retail comparison found most overlapping labels incorrect; live ARE/TLK names are used instead.
 - ✅ `moduleOverview` + `getArea` use `HARDCODED_MODULE_NAMES` as fallback
 - ✅ Deep-scan Phase 3 documented: DLG (12 node fields), ERF (160-byte header), UTC (script hooks), JRL (quest/entry), BWM (AABB/raycast), Xoreos decompiler
 - ✅ Test suite: **1449 passed, 1 skipped, 0 failures**

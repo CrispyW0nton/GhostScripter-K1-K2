@@ -16,6 +16,7 @@ dist/
 build/
 *.spec.bak
 GhostScripter-K1-K2.spec
+/GhostScripter-K1-K2.exe
 
 # ── Databases & logs ──────────────────────────────────────────────
 *.db

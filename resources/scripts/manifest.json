@@ -1,0 +1,32 @@
+{
+  "schema": "ghostscripter.nwscript-provenance.v1",
+  "source_repository": "https://github.com/KobaltBlu/KotOR-Scripting-Tool",
+  "source_commit": "ddd580e1b85e9c25bf5eea77a0b6938e396579c6",
+  "files": {
+    "k1/nwscript.nss": {
+      "game": "K1",
+      "sha256": "13e64e3dc9f65a821c7ebf80e97cdfd65505d0c581f5464ea5845af2c310157f",
+      "function_count": 772,
+      "constant_declaration_count": 1490,
+      "active_unique_constant_count": 1490,
+      "confidence": "high",
+      "cross_checks": [
+        "https://github.com/xoreos/xoreos/blob/master/src/engines/kotor/script/function_tables.h"
+      ]
+    },
+    "k2/nwscript.nss": {
+      "game": "K2",
+      "sha256": "afb8adb2c2806b9c5ef75360ec75ecc62b74bcfe9d42cc4f4e1d305b26a7805d",
+      "function_count": 877,
+      "constant_declaration_count": 1810,
+      "active_unique_constant_count": 1805,
+      "duplicate_declarations": 5,
+      "confidence": "high",
+      "cross_checks": [
+        "https://github.com/xoreos/xoreos/blob/master/src/engines/kotor2/script/function_tables.h",
+        "https://github.com/th3w1zard1/KotOR.js/blob/master/src/nwscript/NWScriptDefK2.ts"
+      ],
+      "known_deviation": "Community-corrected SetOrientOnClick declaration; not a byte-for-byte retail header dump."
+    }
+  }
+}

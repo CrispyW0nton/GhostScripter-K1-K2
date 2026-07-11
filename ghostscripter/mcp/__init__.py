@@ -12,7 +12,7 @@ Tools exposed:
   • searchResources       — full-text search across 2DA tables and TLK strings
 
   Reading resources
-  • readGFF               — parse any GFF-based file into a JSON dict
+  • readGFF               — parse GFF into a typed, lossless JSON document
   • readDLG               — import a dialogue file as structured JSON
   • readTwoDA             — read a 2DA table with filtering and pagination
   • readTLK               — look up TLK strings by strref
@@ -26,7 +26,7 @@ Tools exposed:
 
   Writing resources
   • writeDLG              — export a dialogue JSON back to binary DLG
-  • writeGFF              — write a generic GFF from a JSON dict
+  • writeGFF              — write typed GFF safely (legacy inference is opt-in)
 
   Analysis & patching
   • searchNWScript        — autocomplete / search NWScript functions/constants

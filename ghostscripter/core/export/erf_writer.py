@@ -66,6 +66,7 @@ RESTYPE_IDS: Dict[str, int] = {
     ".btp":  2043,
     ".utp":  2044,
     ".dft":  2045,
+    ".dtf":  2045,  # Historical alias exposed by PyKotor
     ".gic":  2046,
     ".gui":  2047,
     ".css":  2048,
@@ -113,8 +114,16 @@ class ExportEntry:
     @classmethod
     def from_file(cls, path: Path) -> "ExportEntry":
         ext = path.suffix.lower()
-        restype = RESTYPE_IDS.get(ext, 0)
-        resref = path.stem[:16]
+        if ext not in RESTYPE_IDS:
+            raise ValueError(
+                f"Unknown KotOR resource extension {ext!r}; refusing to encode it as type 0."
+            )
+        restype = RESTYPE_IDS[ext]
+        resref = path.stem
+        if not resref or len(resref) > 16 or not resref.isascii():
+            raise ValueError(
+                f"Invalid KotOR ResRef {resref!r}; expected 1-16 ASCII characters."
+            )
         data = path.read_bytes()
         return cls(resref=resref, restype=restype, data=data, source_path=path)
 
@@ -255,9 +264,17 @@ class ERFWriter:
         erf_data = writer.build()
         """
         dot_ext = f".{ext.lower().lstrip('.')}"
-        restype = RESTYPE_IDS.get(dot_ext, 0)
+        if dot_ext not in RESTYPE_IDS:
+            raise ValueError(
+                f"Unknown KotOR resource extension {dot_ext!r}; refusing to encode it as type 0."
+            )
+        if not resref or len(resref) > 16 or not resref.isascii():
+            raise ValueError(
+                f"Invalid KotOR ResRef {resref!r}; expected 1-16 ASCII characters."
+            )
+        restype = RESTYPE_IDS[dot_ext]
         self._entries.append(ExportEntry(
-            resref=resref[:16],
+            resref=resref,
             restype=restype,
             data=data,
         ))

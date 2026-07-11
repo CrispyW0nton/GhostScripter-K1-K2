@@ -12,7 +12,7 @@ from ghostscripter.mcp.tools_pkg._helpers import (
     _2DA_CACHE, _DEFAULT_PATHS, _INSTALLS, _err, _load_rm, _normalize_game,
     _ok, _prune, _validate_resref, log,
     gff_scalar, gff_locstr, gff_resref, gff_int, gff_float, gff_list,
-    gff_struct_fields,
+    gff_struct_fields, read_module_resource,
 )
 
 
@@ -198,8 +198,19 @@ async def _read_gff(args: dict) -> List[types.TextContent]:
     if not resref:
         return _err("readGFF: 'resref' is required.")
     if not restype:
-        return _err("readGFF: 'restype' is required (e.g. 'utc', 'dlg', '2da').")
-    max_depth = int(args.get("maxDepth", 8))
+        return _err("readGFF: 'restype' is required (e.g. 'utc', 'dlg', 'jrl').")
+    max_depth_raw = args.get("maxDepth")
+    if max_depth_raw is None:
+        max_depth = None
+    else:
+        if isinstance(max_depth_raw, bool):
+            return _err("readGFF: 'maxDepth' must be a positive integer when supplied.")
+        try:
+            max_depth = int(max_depth_raw)
+        except (TypeError, ValueError):
+            return _err("readGFF: 'maxDepth' must be a positive integer when supplied.")
+        if max_depth < 1:
+            return _err("readGFF: 'maxDepth' must be at least 1.")
 
     rm = _load_rm(game_id)
     data = rm.read(f"{resref}.{restype}")
@@ -207,15 +218,21 @@ async def _read_gff(args: dict) -> List[types.TextContent]:
         return _err(f"Resource not found: {resref}.{restype} in {game_id}")
 
     try:
+        import hashlib
+
         from ghostscripter.core.services import GFFService
-        parsed = GFFService.parse_bytes(data)
-        pruned = _prune(parsed, max_depth)
-        return _ok({
+        document = GFFService.parse_typed_bytes(data, max_depth=max_depth)
+        # Source metadata is intentionally outside the typed root and is
+        # ignored by writeGFF, so the entire readGFF response can be passed
+        # back as its ``document`` argument.
+        document["source"] = {
+            "game": game_id,
             "resref": resref,
-            "restype": restype.upper(),
+            "restype": restype.lower(),
             "size_bytes": len(data),
-            "fields": pruned,
-        })
+            "sha256": hashlib.sha256(data).hexdigest(),
+        }
+        return _ok(document)
     except Exception as e:
         return _err(f"GFF parse error for {resref}.{restype}: {e}")
 
@@ -637,109 +654,294 @@ async def _read_gui(args: dict) -> List[types.TextContent]:
 
 
 async def _read_save(args: dict) -> List[types.TextContent]:
-    """Read a KotOR save-game folder and return a structured summary.
+    """Read real data from a KotOR save-game folder.
 
-    KotOR save games are folder-based: each slot is a directory containing
-    a SAVENFO.res (GFF), an ERF archive (savegame.sav for K1, globalvars.res,
-    partytable.res, etc.), module snapshots, and thumbnail screenshots.
-
-    Format reference (PyKotor extract/savedata.py):
-        SAVENFO.res:   save slot metadata (GameName, LastModule, SaveName,
-                       AreaName, CheatUsed, TimePlayed, PartyTable)
-        globalvars.res: global boolean/numeric/string variables
-        partytable.res: active party members and NPC data
-        Characters:     individual character .bic GFF files
-
-    Args:
-        game      (str): "K1" or "K2"
-        save_path (str): absolute path to the save-game folder OR save slot name
-                         (e.g. "QUICKSAVE", "000000 - Taris")
-
-    Returns:
-        game, save_path, save_name, last_module, area_name, time_played_secs,
-        cheat_used, party_members (list of name + portrait), global_count,
-        module_snapshots (list of module IDs in the save)
-
-    Note:
-        Full read of globalvars, party BICs, and module snapshots is planned for
-        v3.3 once PyKotor save-game I/O is fully integrated (Phase 1 backlog).
-        This stub validates the path and returns SAVENFO metadata.
+    The four core components are parsed independently so a damaged or partial
+    save still produces an honest report.  A missing field/component is
+    represented by ``None`` and described by ``completeness``; genuine zeroes,
+    false flags, empty strings, and empty lists are preserved as-is.
     """
-    import os
-    import struct
 
     try:
         game_id = _normalize_game(args.get("game", "K1"))
     except ValueError as e:
         return _err(f"readSave: {e}")
 
-    save_path = args.get("save_path", "").strip()
-    if not save_path:
+    raw_save_path = str(args.get("save_path") or "").strip()
+    if not raw_save_path:
         return _err("readSave: 'save_path' is required.")
 
-    # Resolve path
-    if not os.path.isabs(save_path):
-        # Try to find under the installation saves directory
-        rm = _load_rm(game_id)
-        install_root = getattr(rm, "_path", "") or ""
-        candidate = os.path.join(install_root, "saves", save_path)
-        if os.path.isdir(candidate):
-            save_path = candidate
-        else:
+    save_path = Path(raw_save_path).expanduser()
+    if not save_path.is_absolute():
+        # Slot names are resolved below the loaded/detected installation.  The
+        # ResourceManager stores this as _game_dir (not the obsolete _path).
+        try:
+            rm = _load_rm(game_id)
+        except (FileNotFoundError, OSError) as exc:
             return _err(
-                f"readSave: '{save_path}' is not an absolute path and could not be "
-                f"resolved relative to {game_id} installation saves directory."
+                f"readSave: relative slot '{raw_save_path}' could not be resolved: {exc}"
             )
+        install_root = getattr(rm, "_game_dir", None)
+        if install_root is None:
+            return _err(
+                f"readSave: relative slot '{raw_save_path}' could not be resolved because "
+                f"the {game_id} installation path is unavailable."
+            )
+        save_path = Path(install_root) / "saves" / save_path
 
-    if not os.path.isdir(save_path):
+    if not save_path.is_dir():
         return _err(f"readSave: save folder '{save_path}' does not exist.")
 
-    # Look for SAVENFO.res
-    nfo_path = os.path.join(save_path, "SAVENFO.res")
-    if not os.path.isfile(nfo_path):
-        # K1 uses different naming
-        for fname in os.listdir(save_path):
-            if fname.upper() == "SAVENFO.RES":
-                nfo_path = os.path.join(save_path, fname)
-                break
-        else:
-            return _err(f"readSave: SAVENFO.res not found in '{save_path}'.")
+    save_path = save_path.resolve()
+    files = {
+        child.name.casefold(): child
+        for child in save_path.iterdir()
+        if child.is_file()
+    }
+    expected = {
+        "save_info": "savenfo.res",
+        "party_table": "partytable.res",
+        "global_vars": "globalvars.res",
+        "save_archive": "savegame.sav",
+    }
+    component_paths = {
+        component: files.get(filename.casefold())
+        for component, filename in expected.items()
+    }
+    if not any(component_paths.values()):
+        return _err(
+            f"readSave: '{save_path}' contains none of the four KotOR save components "
+            "(savenfo.res, partytable.res, globalvars.res, savegame.sav)."
+        )
 
     try:
-        with open(nfo_path, "rb") as f:
-            nfo_data = f.read()
+        from pykotor.extract.capsule import Capsule
+        from pykotor.extract.savedata import GlobalVars, PartyTable, SaveInfo
+        from pykotor.resource.formats.gff import read_gff
+        from pykotor.resource.type import ResourceType
+    except (ImportError, ModuleNotFoundError) as exc:
+        return _err(f"readSave: PyKotor save support is unavailable: {exc}")
 
-        from ghostscripter.core.services import GFFService
-        nfo = GFFService.parse_bytes(nfo_data)
-        fields = nfo if isinstance(nfo, dict) else (nfo.get("fields") or nfo)
+    loaded: list[str] = []
+    missing = [name for name, path in component_paths.items() if path is None]
+    errors: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
 
-        # List module snapshots (any .sav files)
-        snapshots = [
-            f[:-4] for f in os.listdir(save_path)
-            if f.lower().endswith(".sav") and f.lower() != "savegame.sav"
-        ]
+    # Values intentionally start at None.  That is materially different from
+    # a parsed empty string/list or zero and prevents partial saves from being
+    # reported as if they contained data they do not have.
+    save_name: str | None = None
+    last_module: str | None = None
+    area_name: str | None = None
+    time_played_secs: int | None = None
+    timestamp: int | None = None
+    cheat_used: bool | None = None
+    pc_name: str | None = None
+    gameplay_hint: int | None = None
+    story_hint: int | None = None
+    portraits: list[dict[str, Any]] | None = None
 
-        save_name = (
-            gff_locstr(fields, "SAVEGAME_NAME") or gff_locstr(fields, "SaveName") or ""
-        )
-        area_name = (
-            gff_locstr(fields, "AREANAME") or gff_locstr(fields, "AreaName") or ""
-        )
+    party_members: list[dict[str, Any]] | None = None
+    party: dict[str, Any] | None = None
+    globals_summary: dict[str, Any] | None = None
+    global_count: int | None = None
+    module_snapshots: list[str] | None = None
+    nested_resource_count: int | None = None
+    nested_resource_types: dict[str, int] | None = None
+    character_resources: list[str] | None = None
 
-        return _ok({
-            "game":             game_id,
-            "save_path":        save_path,
-            "save_name":        save_name,
-            "last_module":      fields.get("LASTMODULE") or fields.get("LastModule", ""),
-            "area_name":        area_name,
-            "time_played_secs": fields.get("TIMEPLAYED") or fields.get("TimePlayed"),
-            "cheat_used":       fields.get("CHEATUSED") or fields.get("CheatUsed"),
-            "party_members":    [],   # Phase 3.3: parse partytable.res BIC files
-            "global_count":     None, # Phase 3.3: parse globalvars.res
-            "module_snapshots": snapshots,
-        })
-    except Exception as exc:
-        return _err(f"readSave: parse error — {exc}")
+    nfo_path = component_paths["save_info"]
+    if nfo_path is not None:
+        try:
+            info = SaveInfo(save_path)
+            info.load()
+            root = read_gff(nfo_path).root
+
+            def _info_value(label: str, attr: str) -> Any:
+                return getattr(info, attr) if root.exists(label) else None
+
+            save_name = _info_value("SAVEGAMENAME", "savegame_name")
+            last_module = _info_value("LASTMODULE", "last_module")
+            area_name = _info_value("AREANAME", "area_name")
+            time_played_secs = _info_value("TIMEPLAYED", "time_played")
+            timestamp = _info_value("TIMESTAMP", "timestamp")
+            cheat_used = _info_value("CHEATUSED", "cheat_used")
+            pc_name = _info_value("PCNAME", "pc_name")
+            gameplay_hint = _info_value("GAMEPLAYHINT", "gameplay_hint")
+            story_hint = _info_value("STORYHINT", "story_hint")
+            portrait_attrs = ("portrait0", "portrait1", "portrait2")
+            portraits = [
+                {"slot": slot, "resref": str(getattr(info, attr))}
+                for slot, attr in enumerate(portrait_attrs)
+                if root.exists(f"PORTRAIT{slot}")
+            ]
+            loaded.append("save_info")
+        except Exception as exc:
+            errors.append({"component": "save_info", "error": f"{type(exc).__name__}: {exc}"})
+
+    party_path = component_paths["party_table"]
+    if party_path is not None:
+        try:
+            table = PartyTable(save_path)
+            table.load()
+            root = read_gff(party_path).root
+
+            if root.exists("PT_MEMBERS"):
+                party_members = [
+                    {"index": member.index, "is_leader": member.is_leader}
+                    for member in table.pt_members
+                ]
+            else:
+                warnings.append({
+                    "component": "party_table",
+                    "warning": "PT_MEMBERS is absent; party membership is unavailable.",
+                })
+
+            available_npcs = None
+            if root.exists("PT_AVAIL_NPCS"):
+                available_npcs = [
+                    {
+                        "index": index,
+                        "available": npc.npc_available,
+                        "selected": npc.npc_selected,
+                    }
+                    for index, npc in enumerate(table.pt_avail_npcs)
+                ]
+
+            # Retail files use the 16-character PT_CONTROLLED_NP label.  Some
+            # older libraries looked for the impossible 17-character
+            # PT_CONTROLLED_NPC spelling, so read the retail field directly.
+            controlled_npc = (
+                root.acquire("PT_CONTROLLED_NP", None)
+                if root.exists("PT_CONTROLLED_NP")
+                else (
+                    root.acquire("PT_CONTROLLED_NPC", None)
+                    if root.exists("PT_CONTROLLED_NPC")
+                    else None
+                )
+            )
+            party = {
+                "member_count": len(party_members) if party_members is not None else None,
+                "declared_member_count": (
+                    root.acquire("PT_NUM_MEMBERS", None)
+                    if root.exists("PT_NUM_MEMBERS")
+                    else None
+                ),
+                "controlled_npc_index": controlled_npc,
+                "available_npcs": available_npcs,
+                "gold": table.pt_gold if root.exists("PT_GOLD") else None,
+                "xp_pool": table.pt_xp_pool if root.exists("PT_XP_POOL") else None,
+                "played_seconds": (
+                    table.time_played if root.exists("PT_PLAYEDSECONDS") else None
+                ),
+                "solo_mode": table.pt_solomode if root.exists("PT_SOLOMODE") else None,
+                "cheat_used": (
+                    table.pt_cheat_used if root.exists("PT_CHEAT_USED") else None
+                ),
+                "components": (
+                    table.pt_item_componen if root.exists("PT_ITEM_COMPONEN") else None
+                ),
+                "chemicals": (
+                    table.pt_item_chemical if root.exists("PT_ITEM_CHEMICAL") else None
+                ),
+                "influence": (
+                    list(table.pt_influence) if root.exists("PT_INFLUENCE") else None
+                ),
+                "journal_entry_count": (
+                    len(table.jnl_entries) if root.exists("JNL_Entries") else None
+                ),
+            }
+            loaded.append("party_table")
+        except Exception as exc:
+            errors.append({"component": "party_table", "error": f"{type(exc).__name__}: {exc}"})
+
+    globals_path = component_paths["global_vars"]
+    if globals_path is not None:
+        try:
+            save_globals = GlobalVars(save_path)
+            save_globals.load()
+            root = read_gff(globals_path).root
+            category_fields = {
+                "booleans": ("CatBoolean", "ValBoolean", save_globals.global_bools),
+                "numbers": ("CatNumber", "ValNumber", save_globals.global_numbers),
+                "strings": ("CatString", "ValString", save_globals.global_strings),
+                "locations": ("CatLocation", "ValLocation", save_globals.global_locs),
+            }
+            counts: dict[str, int | None] = {}
+            for category, (names_field, values_field, values) in category_fields.items():
+                if root.exists(names_field) and root.exists(values_field):
+                    counts[category] = len(values)
+                else:
+                    counts[category] = None
+                    warnings.append({
+                        "component": "global_vars",
+                        "warning": (
+                            f"{category} are unavailable because {names_field} or "
+                            f"{values_field} is absent."
+                        ),
+                    })
+            known_counts = [count for count in counts.values() if count is not None]
+            global_count = sum(known_counts) if len(known_counts) == len(counts) else None
+            globals_summary = {"counts": counts, "total_count": global_count}
+            loaded.append("global_vars")
+        except Exception as exc:
+            errors.append({"component": "global_vars", "error": f"{type(exc).__name__}: {exc}"})
+
+    archive_path = component_paths["save_archive"]
+    if archive_path is not None:
+        try:
+            resources = Capsule(archive_path).resources()
+            module_snapshots = []
+            character_resources = []
+            nested_resource_types = {}
+            for resource in resources:
+                restype = resource.restype()
+                extension = restype.extension.lower()
+                nested_resource_types[extension] = nested_resource_types.get(extension, 0) + 1
+                if restype == ResourceType.SAV:
+                    module_snapshots.append(resource.resname())
+                elif restype == ResourceType.UTC and (
+                    resource.resname().casefold() == "pc"
+                    or resource.resname().casefold().startswith("availnpc")
+                ):
+                    character_resources.append(f"{resource.resname()}.{extension}")
+            nested_resource_count = len(resources)
+            loaded.append("save_archive")
+        except Exception as exc:
+            errors.append({"component": "save_archive", "error": f"{type(exc).__name__}: {exc}"})
+
+    # A component that exists but did not parse is neither loaded nor missing;
+    # its exact failure is retained in errors.
+    status = "complete" if len(loaded) == len(expected) and not warnings else "partial"
+    return _ok({
+        "game": game_id,
+        "save_path": str(save_path),
+        "save_name": save_name,
+        "last_module": last_module,
+        "area_name": area_name,
+        "time_played_secs": time_played_secs,
+        "timestamp": timestamp,
+        "cheat_used": cheat_used,
+        "pc_name": pc_name,
+        "gameplay_hint": gameplay_hint,
+        "story_hint": story_hint,
+        "portraits": portraits,
+        "party_members": party_members,
+        "party": party,
+        "global_count": global_count,
+        "globals": globals_summary,
+        "module_snapshots": module_snapshots,
+        "nested_resource_count": nested_resource_count,
+        "nested_resource_types": nested_resource_types,
+        "character_resources": character_resources,
+        "completeness": {
+            "status": status,
+            "loaded_components": loaded,
+            "missing_components": missing,
+            "errors": errors,
+            "warnings": warnings,
+        },
+    })
 
 
 # ─────────────────────────────────────────────
@@ -794,12 +996,27 @@ async def _read_ncs(args: dict) -> List[types.TextContent]:
             ncs_obj: NCS = read_ncs(ncs_data)
             instructions_out = []
             for i, instr in enumerate(ncs_obj.instructions):
+                encoded = instr.ins_type.value
+                opcode = int(encoded.byte_code)
+                qualifier = int(encoded.qualifier)
+                start = int(getattr(instr, "offset", 13))
+                end = (
+                    int(getattr(ncs_obj.instructions[i + 1], "offset", len(ncs_data)))
+                    if i + 1 < len(ncs_obj.instructions) else len(ncs_data)
+                )
+                jump_target = (
+                    getattr(instr.jump, "offset", None)
+                    if getattr(instr, "jump", None) is not None else None
+                )
                 instructions_out.append({
                     "offset":    f"{getattr(instr, 'offset', i * 2):#06x}",
-                    "opcode":    f"{instr.ins_type.value:#04x}",
-                    "qualifier": f"{getattr(instr, 'type_qualifier', 0):#04x}",
-                    "mnemonic":  instr.ins_type.name,
+                    "opcode":    f"{opcode:#04x}",
+                    "qualifier": f"{qualifier:#04x}",
+                    "mnemonic":  "CONSTx" if opcode == 0x04 else instr.ins_type.name,
+                    "instruction_type": instr.ins_type.name,
                     "args":      [str(a) for a in getattr(instr, "args", [])],
+                    "args_hex":  ncs_data[start + 2:end].hex(),
+                    "jump_target": jump_target,
                 })
             return _ok({
                 "game":              game_id,
@@ -842,26 +1059,26 @@ async def _read_ncs(args: dict) -> List[types.TextContent]:
             0x23: "DECxSP",   0x24: "INCxSP",   0x25: "JNZ",
             0x26: "CPDOWNBP", 0x27: "CPTOPBP",  0x28: "DECIBP",
             0x29: "INCIBP",   0x2A: "SAVEBP",   0x2B: "RESTOREBP",
-            0x2C: "STORE_STATE",0x2D:"NOP",      0x42: "T",
+            0x2C: "STORE_STATE",0x2D:"NOP",
         }
         # Arg sizes per opcode (bytes after the 2-byte opcode+qualifier prefix)
         # Sourced from PyKotor ncs_data.py and xoreos-tools ncsdis.cpp.
         # Key: all two-operand stack ops (CPDOWNSP, CPTOPSP, CPDOWNBP, CPTOPBP)
-        # take 4+4=8 bytes (offset + size).  One-operand stack ops
+        # take 4+2=6 bytes (int32 offset + uint16 size).  One-operand stack ops
         # (DECxSP, INCxSP, DECIBP, INCIBP) take 4 bytes.
         # Jump/JSR/JZ/JNZ take a 4-byte signed offset.
         # MOVSP takes a 4-byte signed offset.
         # ACTION takes 2 bytes (routine ID) + 1 byte (arg count) = 3.
-        # DESTRUCT takes 4+2+2 = 8 bytes (stack size, stack offset, dont-destroy-size).
+        # DESTRUCT takes 2+2+2 = 6 bytes (size, offset, dont-destroy-size).
         # STORE_STATE takes 4+4 = 8 bytes (base-pointer, stack-pointer).
         # CONSTx arg size depends on qualifier (handled below).
         # All arithmetic/logic/compare ops (RSADDx, LOGANDxx ... MODxx,
         # NEGx, COMPx, NOTx, EQUALxx, NEQUALxx, GEQxx, GTxx, LTxx, LEQxx,
         # SHLEFTxx, SHRIGHTxx, USHRIGHTxx) have 0 extra args.
         ARG_SIZES = {
-            0x01: 8,   # CPDOWNSP  — stack_offset(4) + size(4)
+            0x01: 6,   # CPDOWNSP  — stack_offset(4) + size(2)
             0x02: 0,   # RSADDx    — no args
-            0x03: 8,   # CPTOPSP   — stack_offset(4) + size(4)
+            0x03: 6,   # CPTOPSP   — stack_offset(4) + size(2)
             0x04: 4,   # CONSTx    — overridden below by qualifier
             0x05: 3,   # ACTION    — routine_id(2) + arg_count(1)
             0x06: 0,   # LOGANDxx
@@ -890,13 +1107,13 @@ async def _read_ncs(args: dict) -> List[types.TextContent]:
             0x1E: 4,   # JSR       — jump_offset(4) signed
             0x1F: 4,   # JZ        — jump_offset(4) signed
             0x20: 0,   # RETN
-            0x21: 8,   # DESTRUCT  — stack_size(4) + dont_destroy_offset(2) + dont_destroy_size(2) = 8
+            0x21: 6,   # DESTRUCT  — size(2) + offset(2) + dont_destroy_size(2)
             0x22: 0,   # NOTx
             0x23: 4,   # DECxSP    — stack_offset(4) signed
             0x24: 4,   # INCxSP    — stack_offset(4) signed
             0x25: 4,   # JNZ       — jump_offset(4) signed
-            0x26: 8,   # CPDOWNBP  — stack_offset(4) + size(4)
-            0x27: 8,   # CPTOPBP   — stack_offset(4) + size(4)
+            0x26: 6,   # CPDOWNBP  — stack_offset(4) + size(2)
+            0x27: 6,   # CPTOPBP   — stack_offset(4) + size(2)
             0x28: 4,   # DECIBP    — stack_offset(4) signed
             0x29: 4,   # INCIBP    — stack_offset(4) signed
             0x2A: 0,   # SAVEBP
@@ -1041,12 +1258,12 @@ async def _read_ifo(args: dict) -> List[types.TextContent]:
         except FileNotFoundError:
             return _err("readIFO: installation not loaded — call gsLoadInstallation first")
 
-        ifo_data = rm.read("module.ifo")
-        # Try module-name.ifo first, then generic module.ifo inside the capsule
+        ifo_data = read_module_resource(rm, resref, "module.ifo")
         if ifo_data is None:
-            ifo_data = rm.read(f"{resref}.ifo")
-        if ifo_data is None:
-            return _err(f"readIFO: 'module.ifo' not found for module '{resref}' in {game_id} installation")
+            return _err(
+                f"readIFO: 'module.ifo' not found inside module '{resref}' "
+                f"in the {game_id} installation"
+            )
 
         # ── Opportunistic PyKotor delegation ──────────────────────────────────
         # pykotor.resource.generics.ifo provides a typed IFO dataclass that
@@ -1154,8 +1371,8 @@ async def _read_ifo(args: dict) -> List[types.TextContent]:
         return _ok({
             "game":            game_id,
             "resref":          resref,
-            "mod_name":        (gff_locstr(root, "Mod_Name") or ""),
-            "mod_description": (gff_locstr(root, "Mod_Description") or ""),
+            "mod_name":        (gff_locstr(root, "Mod_Name", rm=rm) or ""),
+            "mod_description": (gff_locstr(root, "Mod_Description", rm=rm) or ""),
             "tag":             gff_resref(root, "Mod_Tag"),
             "entry_area":      gff_resref(root, "Mod_Entry_Area"),
             "entry_x":         gff_float(root, "Mod_Entry_X"),
@@ -1195,7 +1412,7 @@ async def _read_wav(args: dict) -> List[types.TextContent]:
         data_b64 = (args.get("data_b64") or "").strip()
 
         if data_b64:
-            wav_bytes = base64.b64decode(data_b64)
+            wav_bytes = base64.b64decode(data_b64, validate=True)
         elif resref:
             try:
                 rm = _load_rm(game_id)
@@ -1573,27 +1790,41 @@ async def _get_nwscript_db(args: dict) -> List[types.TextContent]:
     for func in getattr(db, "functions", []):
         functions.append({
             "name": func.name,
-            "return_type": str(func.return_type) if hasattr(func, "return_type") else "",
+            "return_type": func.return_type,
             "parameters": [
-                {"name": p.name, "type": str(p.param_type), "default": str(p.default) if p.default is not None else None}
-                for p in getattr(func, "parameters", [])
+                {"name": p.name, "type": p.type, "default": p.default}
+                for p in func.params
             ],
-            "category": getattr(func, "category", ""),
-            "description": getattr(func, "description", ""),
+            "signature": func.signature,
+            "category": func.category,
+            "description": func.comment,
+            "source_line": func.line_number,
         })
 
     constants = []
     for const in getattr(db, "constants", []):
         constants.append({
             "name": const.name,
-            "value": str(const.value) if hasattr(const, "value") else "",
-            "category": getattr(const, "category", ""),
+            "type": const.type,
+            "value": const.value,
+            "category": const.category,
+            "source_line": const.line_number,
         })
+
+    duplicate_declarations = {
+        name: [
+            {"value": item.value, "source_line": item.line_number}
+            for item in declarations
+        ]
+        for name, declarations in getattr(db, "duplicate_constants", {}).items()
+    }
 
     return _ok({
         "game": game_id,
         "function_count": len(functions),
         "constant_count": len(constants),
+        "constant_declaration_count": len(getattr(db, "constant_declarations", constants)),
+        "duplicate_constant_declarations": duplicate_declarations,
         "functions": functions,
         "constants": constants,
     })

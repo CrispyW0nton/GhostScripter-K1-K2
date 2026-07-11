@@ -103,7 +103,8 @@ jobs:
         run: python build_tools/build.py --no-zip
 
       - name: Build EXE (single-file)
-        run: python build_tools/build.py --onefile --no-zip
+        # Preserve the folder build: the packaging step below archives it.
+        run: python build_tools/build.py --onefile --no-zip --no-clean
         continue-on-error: true   # single-file is best-effort
 
       - name: Package artefacts into ZIP

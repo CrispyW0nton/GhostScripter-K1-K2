@@ -49,6 +49,8 @@ class DialogueService:
     Exposes: load by resref, export to binary, convert to JSON-safe dict.
     """
 
+    FIDELITY_SCHEMA = "ghostscripter.dlg.source-gff.v1"
+
     def __init__(self, resource_reader=None):
         """
         Parameters
@@ -132,20 +134,45 @@ class DialogueService:
             d["sound"] = node.sound
         if include_branches and node.branches:
             d["branches"] = [
-                {"index": b.target_node_id, "is_reply": b.is_child,
-                 "active_script": b.active_script}
+                {
+                    "index": b.target_node_id,
+                    # ``is_reply`` is retained for the original public
+                    # contract; ``is_child`` is the accurate DLG field name.
+                    "is_reply": b.is_child,
+                    "is_child": b.is_child,
+                    "active_script": b.active_script,
+                    "active_script2": b.active_script2,
+                    "link_comment": b.link_comment,
+                    "display_inactive": b.display_inactive,
+                }
                 for b in node.branches
             ]
         return d
 
     @staticmethod
-    def to_dict(dialogue: Any, include_branches: bool = True) -> Dict[str, Any]:
-        """Return a complete JSON-safe dict for the entire dialogue."""
+    def to_dict(dialogue: Any, include_branches: bool = True,
+                include_fidelity: bool = True) -> Dict[str, Any]:
+        """Return a JSON-safe dialogue DTO.
+
+        Imported DLGs include a clearly named ``source_fidelity`` capsule by
+        default.  The capsule carries the original binary so a public
+        ``readDLG`` response can be passed back to ``writeDLG`` without losing
+        StuntList, localized variants, root metadata, or conditional fields
+        that are intentionally not flattened into this compact DTO.
+        """
         result: Dict[str, Any] = {
             "entry_count": len(dialogue.entries),
             "reply_count": len(dialogue.replies),
             "starters": [
-                {"index": s.target_node_id, "is_reply": s.is_child}
+                {
+                    "index": s.target_node_id,
+                    "is_reply": s.is_child,
+                    "is_child": s.is_child,
+                    "active_script": s.active_script,
+                    "active_script2": s.active_script2,
+                    "link_comment": s.link_comment,
+                    "display_inactive": s.display_inactive,
+                }
                 for s in dialogue.starters
             ],
             "entries": [
@@ -156,11 +183,39 @@ class DialogueService:
                 DialogueService.node_to_dict(r, True, include_branches)
                 for r in dialogue.replies
             ],
+            "skippable": dialogue.skippable,
+            "delay_entry": dialogue.delay_entry,
+            "delay_reply": dialogue.delay_reply,
+            "ambient_track": dialogue.ambient_track,
+            "animated_cut": dialogue.animated_cut,
+            "camera_model": dialogue.camera_model,
+            "conversation_type": dialogue.conversation_type,
+            "computer_type": dialogue.computer_type,
+            "old_hit_check": dialogue.old_hit_check,
+            "unequip_items": dialogue.unequip_items,
+            "unequip_h_item": dialogue.unequip_h_item,
+            "word_count": dialogue.word_count,
         }
         if dialogue.on_end:
             result["end_script"] = dialogue.on_end
         if dialogue.on_abort:
             result["abort_script"] = dialogue.on_abort
+
+        if include_fidelity:
+            source_bytes = getattr(dialogue, "_source_bytes", None)
+            if source_bytes is None and getattr(dialogue, "_raw_gff", None) is not None:
+                try:
+                    from pykotor.resource.formats.gff import bytes_gff  # type: ignore
+                    source_bytes = bytes_gff(dialogue._raw_gff)
+                except Exception:
+                    source_bytes = None
+            if source_bytes is not None:
+                result["source_fidelity"] = {
+                    "schema": DialogueService.FIDELITY_SCHEMA,
+                    "required_for_lossless_save": True,
+                    "source_game": getattr(dialogue, "source_game", None),
+                    "binary_base64": base64.b64encode(source_bytes).decode("ascii"),
+                }
         return result
 
     # ── Builder (dict → model) ────────────────────────────────────────────────
@@ -177,37 +232,167 @@ class DialogueService:
             DialogueFile, DialogueNode, DialogueBranch,
         )
 
-        dlg = DialogueFile()
-        dlg.on_end = dlg_dict.get("end_script", "")
-        dlg.on_abort = dlg_dict.get("abort_script", "")
+        fidelity_present = "source_fidelity" in dlg_dict
+        if fidelity_present:
+            from ghostscripter.core.export.dlg_reader import DLGImporter
+            from ghostscripter.core.export.dlg_writer import DLGFidelityError
 
-        def _node(d: dict) -> DialogueNode:
-            n = DialogueNode()
-            n.text = d.get("text", "")
-            n.text_strref = int(d.get("strref", -1))
-            n.speaker = d.get("speaker", "")
-            n.listener = d.get("listener", "")
-            n.script1 = d.get("script1", "")
-            n.script2 = d.get("script2", "")
-            n.vo_resref = d.get("vo_resref", "")
-            n.sound = d.get("sound", "")
-            for b in d.get("branches", []):
-                br = DialogueBranch()
-                br.target_node_id = int(b.get("index", -1))
-                br.is_child = bool(b.get("is_reply", False))
-                br.active_script = b.get("active_script", "")
-                n.branches.append(br)
+            fidelity = dlg_dict.get("source_fidelity")
+            if not isinstance(fidelity, dict):
+                raise DLGFidelityError(
+                    "Imported dialogue DTO is fidelity-sensitive, but "
+                    "'source_fidelity' is not an object. No file was written."
+                )
+            if fidelity.get("schema") != DialogueService.FIDELITY_SCHEMA:
+                raise DLGFidelityError(
+                    "Imported dialogue DTO uses an unknown source_fidelity "
+                    f"schema {fidelity.get('schema')!r}. No file was written."
+                )
+            encoded = fidelity.get("binary_base64")
+            if not isinstance(encoded, str) or not encoded:
+                raise DLGFidelityError(
+                    "Imported dialogue DTO requires its source_fidelity "
+                    "binary_base64 payload for a lossless save. No file was written."
+                )
+            try:
+                source = base64.b64decode(encoded, validate=True)
+            except Exception as exc:
+                raise DLGFidelityError(
+                    "Imported dialogue DTO has an invalid source_fidelity "
+                    f"base64 payload ({exc}). No file was written."
+                ) from exc
+            if not source.startswith(b"DLG V3.2"):
+                raise DLGFidelityError(
+                    "source_fidelity payload is not a KotOR DLG V3.2 file. "
+                    "No file was written."
+                )
+            dlg = DLGImporter().import_from_bytes(source)
+        else:
+            # Normal authoring DTO: no source tree is needed or expected.
+            dlg = DialogueFile()
+
+        if "end_script" in dlg_dict:
+            dlg.on_end = str(dlg_dict.get("end_script") or "")
+        if "abort_script" in dlg_dict:
+            dlg.on_abort = str(dlg_dict.get("abort_script") or "")
+
+        root_fields = {
+            "skippable": ("skippable", bool),
+            "delay_entry": ("delay_entry", int),
+            "delay_reply": ("delay_reply", int),
+            "ambient_track": ("ambient_track", str),
+            "animated_cut": ("animated_cut", bool),
+            "camera_model": ("camera_model", str),
+            "conversation_type": ("conversation_type", int),
+            "computer_type": ("computer_type", int),
+            "old_hit_check": ("old_hit_check", bool),
+            "unequip_items": ("unequip_items", bool),
+            "unequip_h_item": ("unequip_h_item", bool),
+            "word_count": ("word_count", int),
+        }
+        for dto_key, (attr, converter) in root_fields.items():
+            if dto_key in dlg_dict:
+                setattr(dlg, attr, converter(dlg_dict[dto_key]))
+
+        def _branch(d: dict, existing: DialogueBranch | None = None,
+                    default_index: int = -1) -> DialogueBranch:
+            if not isinstance(d, dict):
+                raise ValueError("Each dialogue branch must be a JSON object.")
+            br = existing or DialogueBranch()
+            if "index" in d:
+                br.target_node_id = int(d["index"])
+            elif existing is None:
+                br.target_node_id = default_index
+            if "is_child" in d:
+                br.is_child = bool(d["is_child"])
+            elif "is_reply" in d:
+                br.is_child = bool(d["is_reply"])
+            if "active_script" in d:
+                br.active_script = str(d["active_script"] or "")
+            if "active_script2" in d:
+                br.active_script2 = str(d["active_script2"] or "")
+            if "link_comment" in d:
+                br.link_comment = str(d["link_comment"] or "")
+            if "display_inactive" in d:
+                br.display_inactive = bool(d["display_inactive"])
+            return br
+
+        def _node(d: dict, node_type: str, node_id: int,
+                  existing: DialogueNode | None = None) -> DialogueNode:
+            if not isinstance(d, dict):
+                raise ValueError("Each dialogue node must be a JSON object.")
+            n = existing or DialogueNode(node_id=node_id, node_type=node_type)
+            n.node_id = node_id
+            n.node_type = node_type
+            mappings = {
+                "text": ("text", str),
+                "strref": ("text_strref", int),
+                "speaker": ("speaker", str),
+                "listener": ("listener", str),
+                "script1": ("script1", str),
+                "script2": ("script2", str),
+                "vo_resref": ("vo_resref", str),
+                "sound": ("sound", str),
+            }
+            for dto_key, (attr, converter) in mappings.items():
+                if dto_key in d:
+                    raw_value = d[dto_key]
+                    setattr(
+                        n, attr,
+                        converter(raw_value or "")
+                        if converter is str else converter(raw_value),
+                    )
+            if "branches" in d:
+                branch_data = d.get("branches")
+                if not isinstance(branch_data, list):
+                    raise ValueError("Dialogue node 'branches' must be an array.")
+                originals = list(n.branches)
+                n.branches = [
+                    _branch(
+                        branch_d,
+                        originals[i] if i < len(originals) else None,
+                    )
+                    for i, branch_d in enumerate(branch_data)
+                ]
+                for i, branch in enumerate(n.branches):
+                    branch.branch_id = i
             return n
 
-        for e in dlg_dict.get("entries", []):
-            dlg.entries.append(_node(e))
-        for r in dlg_dict.get("replies", []):
-            dlg.replies.append(_node(r))
-        for s in dlg_dict.get("starters", []):
-            br = DialogueBranch()
-            br.target_node_id = int(s.get("index", 0))
-            br.is_child = bool(s.get("is_reply", False))
-            dlg.starters.append(br)
+        def _nodes(dto_key: str, node_type: str,
+                   originals: List[DialogueNode]) -> List[DialogueNode]:
+            if dto_key not in dlg_dict:
+                return originals if fidelity_present else []
+            items = dlg_dict.get(dto_key)
+            if not isinstance(items, list):
+                raise ValueError(f"Dialogue '{dto_key}' must be an array.")
+            return [
+                _node(
+                    item, node_type, i,
+                    originals[i] if i < len(originals) else None,
+                )
+                for i, item in enumerate(items)
+            ]
+
+        dlg.entries = _nodes("entries", "entry", list(dlg.entries))
+        dlg.replies = _nodes("replies", "reply", list(dlg.replies))
+
+        if "starters" in dlg_dict:
+            starter_data = dlg_dict.get("starters")
+            if not isinstance(starter_data, list):
+                raise ValueError("Dialogue 'starters' must be an array.")
+            originals = list(dlg.starters)
+            dlg.starters = [
+                _branch(
+                    item,
+                    originals[i] if i < len(originals) else None,
+                    default_index=0,
+                )
+                for i, item in enumerate(starter_data)
+            ]
+            for i, branch in enumerate(dlg.starters):
+                branch.branch_id = i
+        elif not fidelity_present:
+            dlg.starters = []
 
         return dlg
 
@@ -474,47 +659,115 @@ class GFFService:
 
     @staticmethod
     def parse_bytes(data: bytes) -> Dict[str, Any]:
-        """Parse raw GFF bytes → field dict."""
+        """Parse raw GFF bytes → convenient, untyped field dict.
+
+        This representation is for read-only domain consumers.  It does not
+        retain enough type information for a safe generic write; MCP
+        round-tripping uses :meth:`parse_typed_bytes` instead.
+        """
         from ghostscripter.core.export import GFF3Reader
         return GFF3Reader(data).parse()
 
     @staticmethod
-    def write(file_type: str, fields: Dict[str, Any]) -> bytes:
-        """
-        Build a GFF binary from a field dict.
+    def parse_typed_bytes(
+        data: bytes,
+        *,
+        max_depth: int | None = None,
+    ) -> Dict[str, Any]:
+        """Parse raw GFF bytes into the lossless typed JSON schema."""
+        from ghostscripter.core.gff_codec import read_typed_gff
+        return read_typed_gff(data, max_depth=max_depth)
 
-        Only supports the types needed by the MCP writeGFF tool:
-        str → CExoString, int → DWORD, float → FLOAT,
-        dict → Struct, list[dict] → List.
+    @staticmethod
+    def write_typed(document: Dict[str, Any]) -> bytes:
+        """Write a complete typed GFF document without inferring types."""
+        from ghostscripter.core.gff_codec import write_typed_gff
+        return write_typed_gff(document)
+
+    @staticmethod
+    def write(
+        file_type: str,
+        fields: Dict[str, Any],
+        *,
+        allow_lossy: bool = False,
+    ) -> bytes:
         """
+        Build a GFF binary from an ambiguous legacy field dict.
+
+        This compatibility path necessarily guesses types (``int`` becomes
+        ``UInt32``, for example) and must therefore be explicitly opted into.
+        New code should use :meth:`write_typed` with the schema returned by
+        :meth:`parse_typed_bytes`.
+        """
+        if not allow_lossy:
+            raise ValueError(
+                "untyped GFF fields are ambiguous; use the typed document from "
+                "readGFF, or explicitly set allow_lossy=True for a new legacy file"
+            )
         from ghostscripter.core.export import GFF3Writer, GFFStruct
+        import math
+
+        if not isinstance(fields, dict):
+            raise ValueError("legacy GFF fields must be a dictionary")
 
         w = GFF3Writer(file_type.ljust(4)[:4])
 
-        def _add(node: Any, d: dict) -> None:
+        def _add(node: Any, d: dict, path: str = "root") -> None:
             for key, val in d.items():
+                if not isinstance(key, str):
+                    raise ValueError(f"{path} field labels must be strings")
                 if key.startswith("__"):
                     continue
+                try:
+                    label_bytes = key.encode("ascii", errors="strict")
+                except UnicodeEncodeError as exc:
+                    raise ValueError(f"{path}.{key} label must be ASCII") from exc
+                if len(label_bytes) > 16:
+                    raise ValueError(
+                        f"{path}.{key} label exceeds GFF's 16-byte limit"
+                    )
                 if isinstance(val, str):
+                    try:
+                        val.encode("cp1252", errors="strict")
+                    except UnicodeEncodeError as exc:
+                        raise ValueError(
+                            f"{path}.{key} cannot be represented in KotOR's cp1252 encoding"
+                        ) from exc
                     node.add_cexo(key, val)
                 elif isinstance(val, bool):
                     node.add_byte(key, int(val))
                 elif isinstance(val, int):
+                    if not 0 <= val <= 0xFFFFFFFF:
+                        raise ValueError(
+                            f"{path}.{key} is outside the inferred UInt32 range; "
+                            "use a typed document for signed/64-bit fields"
+                        )
                     node.add_dword(key, val)
                 elif isinstance(val, float):
+                    if not math.isfinite(val):
+                        raise ValueError(f"{path}.{key} must be a finite float")
                     node.add_float(key, val)
                 elif isinstance(val, dict):
                     s = GFFStruct()
-                    _add(s, val)
+                    _add(s, val, f"{path}.{key}")
                     node.add_struct(key, s)
                 elif isinstance(val, list):
                     structs = []
-                    for item in val:
-                        if isinstance(item, dict):
-                            s = GFFStruct()
-                            _add(s, item)
-                            structs.append(s)
+                    for index, item in enumerate(val):
+                        if not isinstance(item, dict):
+                            raise ValueError(
+                                f"{path}.{key}[{index}] must be a struct object; "
+                                "legacy GFF lists cannot contain scalar values"
+                            )
+                        s = GFFStruct()
+                        _add(s, item, f"{path}.{key}[{index}]")
+                        structs.append(s)
                     node.add_list(key, structs)
+                else:
+                    raise ValueError(
+                        f"{path}.{key} uses unsupported legacy value type "
+                        f"{type(val).__name__}; use a typed document"
+                    )
 
         _add(w.root, fields)
         return w.build()
@@ -799,15 +1052,20 @@ class ERFService:
 
         writer = ERFWriter(file_type=archive_type)
         warnings: list[str] = []
-        for item in files:
-            resref = str(item.get("resref", ""))[:16]
+        for index, item in enumerate(files):
+            resref = str(item.get("resref", ""))
+            if not resref or len(resref) > 16 or not resref.isascii():
+                raise ValueError(
+                    f"Invalid ERF ResRef {resref!r}; expected 1-16 ASCII characters."
+                )
             restype = str(item.get("restype", "")).lower().lstrip(".")
             raw_b64 = item.get("data_b64", "")
             try:
-                data = base64.b64decode(raw_b64)
-            except Exception:
-                warnings.append(f"Skipped '{resref}': invalid base64.")
-                continue
+                data = base64.b64decode(raw_b64, validate=True)
+            except Exception as exc:
+                raise ValueError(
+                    f"writeERF: files[{index}] ({resref!r}) has invalid base64: {exc}"
+                ) from exc
             writer.add_resource(resref, restype, data)
 
         erf_bytes = writer.build()

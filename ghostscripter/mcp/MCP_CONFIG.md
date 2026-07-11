@@ -125,7 +125,7 @@ Connect via `http://localhost:6400/mcp`.
 ### Reading Resources
 | Tool | Description |
 |------|-------------|
-| `readGFF` | Parse any GFF binary file into a JSON field tree |
+| `readGFF` | Parse GFF into a typed, lossless JSON tree (all field types retained) |
 | `readDLG` | Import a dialogue file as structured JSON |
 | `readTwoDA` | Read a 2DA table with filtering and pagination |
 | `readTLK` | Look up TLK strings by strref ID |
@@ -143,7 +143,7 @@ Connect via `http://localhost:6400/mcp`.
 | Tool | Description |
 |------|-------------|
 | `writeDLG` | Export a dialogue JSON back to binary DLG |
-| `writeGFF` | Write a generic GFF binary from a JSON dict |
+| `writeGFF` | Losslessly write a typed `readGFF` document; untyped inference requires explicit lossy opt-in |
 
 ### Analysis & Patching
 | Tool | Description |

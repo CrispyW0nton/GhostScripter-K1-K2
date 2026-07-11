@@ -307,11 +307,14 @@ class TestBug4ERFRestypeMap(unittest.TestCase):
         """
         seen: dict = {}
         collisions = []
+        documented_aliases = {frozenset({".dft", ".dtf"})}
         for ext, type_id in ERFWriter.RESTYPE_MAP.items():
             if type_id in seen:
-                collisions.append(
-                    f"{ext}={type_id} collides with {seen[type_id]}={type_id}"
-                )
+                pair = frozenset({ext, seen[type_id]})
+                if pair not in documented_aliases:
+                    collisions.append(
+                        f"{ext}={type_id} collides with {seen[type_id]}={type_id}"
+                    )
             else:
                 seen[type_id] = ext
         self.assertEqual(collisions, [],
@@ -828,13 +831,13 @@ class TestDecompileNcsBytes(unittest.TestCase):
         self.assertIsInstance(result, str)
         self.assertTrue(len(result) > 0, "Expected non-empty decompile output")
 
-    def test_decompile_contains_void_main(self):
-        """Decompiling a void main() script should produce text containing 'void main'."""
+    def test_unverified_decompile_falls_back_to_disassembly(self):
+        """A lossy reconstruction must not be presented as verified source."""
         ncs_bytes = self._make_ncs_bytes()
         stub = self._make_main_window_stub()
         result = stub._decompile_ncs_bytes(ncs_bytes, "test_decompile")
-        self.assertIn("void main", result,
-            f"Expected 'void main' in decompiled output, got:\n{result[:300]}")
+        self.assertIn("disassembly", result.lower())
+        self.assertIn("RETN", result)
 
     def test_decompile_empty_bytes_returns_stub(self):
         """_decompile_ncs_bytes must not crash on empty input."""

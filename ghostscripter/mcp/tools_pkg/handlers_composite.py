@@ -11,7 +11,7 @@ from pathlib import Path
 from ghostscripter.mcp.tools_pkg._helpers import (
     _err, _load_rm, _normalize_game, _ok, _prune, _validate_resref, log,
     gff_scalar, gff_locstr, gff_resref, gff_int, gff_float, gff_list,
-    gff_struct_fields, HARDCODED_MODULE_NAMES,
+    gff_struct_fields, read_module_resource,
 )
 
 
@@ -49,7 +49,7 @@ async def _get_resource(args: dict) -> List[types.TextContent]:
         elif restype == "dlg":
             from ghostscripter.core.services import DialogueService
             dlg = DialogueService.parse_bytes(data)
-            result.update(DialogueService.to_dict(dlg))
+            result.update(DialogueService.to_dict(dlg, include_fidelity=False))
 
         elif restype in ("utc", "utp", "uts", "utt", "utw", "ute", "utm",
                          "are", "git", "jrl", "ifo", "fac", "bic",
@@ -274,7 +274,7 @@ async def _get_quest(args: dict) -> List[types.TextContent]:
             try:
                 from ghostscripter.core.services import DialogueService
                 dlg = DialogueService.parse_bytes(dlg_data)
-                d = DialogueService.to_dict(dlg)
+                d = DialogueService.to_dict(dlg, include_fidelity=False)
                 # Check if any entry/reply references our scripts
                 refs: list[str] = []
                 for entry in d.get("entries", []) + d.get("replies", []):
@@ -382,7 +382,7 @@ async def _get_npc(args: dict) -> List[types.TextContent]:
                 try:
                     from ghostscripter.core.services import DialogueService, TLKService
                     dlg = DialogueService.parse_bytes(dlg_data)
-                    d = DialogueService.to_dict(dlg)
+                    d = DialogueService.to_dict(dlg, include_fidelity=False)
                     # Resolve TLK for first entry
                     opening_text = ""
                     if d.get("starters") and d.get("entries"):
@@ -563,9 +563,45 @@ async def _get_area(args: dict) -> List[types.TextContent]:
 
     rm = _load_rm(game_id)
 
+    requested_module = (
+        args.get("module_id") or args.get("moduleId") or ""
+    ).casefold().strip()
+    if requested_module:
+        module_err = _validate_resref(requested_module, "getArea")
+        if module_err:
+            return _err(module_err.replace("resref", "module_id"))
+        source_getter = getattr(type(rm), "module_sources", None)
+        if callable(source_getter) and not rm.module_sources(requested_module):
+            return _err(
+                f"getArea: no live .mod/.rim/.erf capsule found for "
+                f"module_id '{requested_module}'."
+            )
+
+    # Resolve an area to the one live capsule that contains its ARE.  Area
+    # and module resrefs often match, but that is not guaranteed and must not
+    # be assumed when archive evidence can decide it.
+    module_context: str | None = requested_module or None
+    context_finder = getattr(type(rm), "module_ids_for_resource", None)
+    if module_context is None and callable(context_finder):
+        matches = rm.module_ids_for_resource(f"{resref}.are")
+        if len(matches) > 1:
+            return _err(
+                f"getArea: '{resref}.are' occurs in multiple modules "
+                f"({', '.join(matches)}); provide module_id explicitly."
+            )
+        if len(matches) == 1:
+            module_context = matches[0]
+
+    def _read_area_resource(extension: str) -> bytes | None:
+        filename = f"{resref}.{extension}"
+        if module_context:
+            return read_module_resource(rm, module_context, filename)
+        return rm.read(filename)
+
     result: dict = {
         "game": game_id,
         "resref": resref,
+        "module_id": module_context,
         "area_name": None,
         "tag": None,
         "tileset": None,
@@ -624,7 +660,7 @@ async def _get_area(args: dict) -> List[types.TextContent]:
     }
 
     # ── ARE (area properties) ────────────────────────────────────────────────
-    are_data = rm.read(f"{resref}.are")
+    are_data = _read_area_resource("are")
     if are_data is None:
         return _err(f"getArea: area '{resref}' not found in {game_id} installation.")
 
@@ -632,7 +668,10 @@ async def _get_area(args: dict) -> List[types.TextContent]:
         from ghostscripter.core.services import GFFService
         are = GFFService.parse_bytes(are_data)
         fields = are if isinstance(are, dict) else (are.get("fields") or are)
-        result["area_name"]     = fields.get("Name", {}).get("value") or fields.get("Name")
+        result["area_name"]     = (
+            gff_locstr(fields, "Name", rm=rm)
+            or gff_locstr(fields, "AreaName", rm=rm)
+        )
         result["tag"]           = fields.get("Tag")
         result["tileset"]       = fields.get("Tileset")
         result["flags"]         = fields.get("Flags")
@@ -680,12 +719,8 @@ async def _get_area(args: dict) -> List[types.TextContent]:
     except Exception as e:
         result["parse_errors"].append(f"ARE parse error: {e}")
 
-    # Fallback: use HARDCODED_MODULE_NAMES when .are has no readable name
-    if not result.get("area_name"):
-        result["area_name"] = HARDCODED_MODULE_NAMES.get(resref.lower(), None)
-
     # ── LYT (room layout) ────────────────────────────────────────────────────
-    lyt_data = rm.read(f"{resref}.lyt")
+    lyt_data = _read_area_resource("lyt")
     if lyt_data:
         try:
             text = lyt_data.decode("latin-1", errors="replace")
@@ -709,7 +744,7 @@ async def _get_area(args: dict) -> List[types.TextContent]:
             result["parse_errors"].append(f"LYT parse error: {e}")
 
     # ── GIT (game instance table) ─────────────────────────────────────────────
-    git_data = rm.read(f"{resref}.git")
+    git_data = _read_area_resource("git")
     if git_data:
         try:
             from ghostscripter.core.services import GFFService
@@ -832,9 +867,8 @@ async def _get_module(args: dict) -> List[types.TextContent]:
 
     Args:
         game        (str):  "K1" or "K2"
-        module_id   (str):  module resref / IFO filename without extension
-                            (e.g. "danm13", "tar_m02aa").  Pass "module" to
-                            read the global module.ifo from the installation root.
+        module_id   (str):  module capsule resref without extension
+                            (e.g. "danm13", "tar_m02aa").
         include_git (bool): if True, add per-area GIT instance counts to
                             the ``area_summaries`` key (default False).
 
@@ -854,19 +888,23 @@ async def _get_module(args: dict) -> List[types.TextContent]:
     except ValueError as e:
         return _err(f"getModule: {e}")
 
-    module_id = (args.get("module_id") or args.get("moduleId") or args.get("module") or "module").lower().strip()
+    module_id = (
+        args.get("module_id") or args.get("moduleId") or args.get("module") or ""
+    ).lower().strip()
+    if not module_id:
+        return _err("getModule: 'module_id' is required.")
+    module_error = _validate_resref(module_id, "getModule")
+    if module_error:
+        return _err(module_error)
     include_git: bool = bool(args.get("include_git", False))
 
     rm = _load_rm(game_id)
 
-    ifo_data = rm.read(f"{module_id}.ifo")
-    if ifo_data is None:
-        # Try bare "module.ifo" as fallback
-        ifo_data = rm.read("module.ifo")
+    ifo_data = read_module_resource(rm, module_id, "module.ifo")
     if ifo_data is None:
         return _err(
-            f"getModule: IFO not found for '{module_id}' in {game_id}. "
-            "Ensure the installation is loaded and the module_id is correct."
+            f"getModule: module.ifo not found in the '{module_id}' capsule "
+            f"for {game_id}. Ensure the module_id matches a live .mod/.rim/.erf."
         )
 
     from ghostscripter.core.services import GFFService
@@ -920,7 +958,9 @@ async def _get_module(args: dict) -> List[types.TextContent]:
             "encounters": "EncounterList",
         }
         for area_resref in areas:
-            git_data = rm.read(f"{area_resref}.git")
+            git_data = read_module_resource(
+                rm, module_id, f"{area_resref}.git",
+            )
             if git_data is None:
                 area_summaries.append({"area": area_resref, "error": "GIT not found"})
                 continue
@@ -937,18 +977,33 @@ async def _get_module(args: dict) -> List[types.TextContent]:
             except Exception as git_err:
                 area_summaries.append({"area": area_resref, "error": str(git_err)})
 
+    source_getter = getattr(type(rm), "module_sources", None)
+    module_sources = (
+        [str(path) for path in rm.module_sources(module_id)]
+        if callable(source_getter) else []
+    )
+
+    def _first_value(*field_names: str):
+        """Return the first present value without discarding valid zeros."""
+        for field_name in field_names:
+            value = gff_scalar(f, field_name)
+            if value is not None:
+                return value
+        return None
+
     result: dict = {
         "game":            game_id,
         "module_id":       module_id,
-        "mod_name":        gff_locstr(f, "Mod_Name") or gff_locstr(f, "ModName"),
-        "tag":             gff_scalar(f, "Mod_Tag") or gff_scalar(f, "Tag"),
-        "vo_id":           gff_scalar(f, "Mod_VO_ID") or gff_scalar(f, "VO_ID"),
-        "entry_area":      gff_scalar(f, "Mod_Entry_Area") or gff_scalar(f, "EntryArea"),
-        "entry_x":         _safe_float(gff_scalar(f, "Mod_Entry_X") or gff_scalar(f, "EntryX")),
-        "entry_y":         _safe_float(gff_scalar(f, "Mod_Entry_Y") or gff_scalar(f, "EntryY")),
-        "entry_z":         _safe_float(gff_scalar(f, "Mod_Entry_Z") or gff_scalar(f, "EntryZ")),
-        "entry_dir_x":     _safe_float(gff_scalar(f, "Mod_Entry_Dir_X") or gff_scalar(f, "EntryDirX")),
-        "entry_dir_y":     _safe_float(gff_scalar(f, "Mod_Entry_Dir_Y") or gff_scalar(f, "EntryDirY")),
+        "module_sources":  module_sources,
+        "mod_name":        gff_locstr(f, "Mod_Name", rm=rm) or gff_locstr(f, "ModName", rm=rm),
+        "tag":             _first_value("Mod_Tag", "Tag"),
+        "vo_id":           _first_value("Mod_VO_ID", "VO_ID"),
+        "entry_area":      _first_value("Mod_Entry_Area", "EntryArea"),
+        "entry_x":         _safe_float(_first_value("Mod_Entry_X", "EntryX")),
+        "entry_y":         _safe_float(_first_value("Mod_Entry_Y", "EntryY")),
+        "entry_z":         _safe_float(_first_value("Mod_Entry_Z", "EntryZ")),
+        "entry_dir_x":     _safe_float(_first_value("Mod_Entry_Dir_X", "EntryDirX")),
+        "entry_dir_y":     _safe_float(_first_value("Mod_Entry_Dir_Y", "EntryDirY")),
         "areas":           areas,
         "area_summaries":  area_summaries,
         "scripts":         scripts,
@@ -1646,6 +1701,12 @@ async def _get_creature(args: dict) -> List[types.TextContent]:
         )
 
     from ghostscripter.core.services import GFFService
+    from pykotor.resource.generics.utc import read_utc
+
+    # PyKotor's typed UTC model is the source of truth for composite semantics:
+    # equipment slots are encoded by Equip_ItemList struct IDs, and script hook
+    # labels do not match the generic On* names used by other GFF resources.
+    utc = read_utc(data)
     raw = GFFService.parse_bytes(data)
     f = raw if isinstance(raw, dict) else (raw.get("fields") or raw)
 
@@ -1659,106 +1720,77 @@ async def _get_creature(args: dict) -> List[types.TextContent]:
 
     # Class/level list
     classes: list = []
-    cl_raw = f.get("ClassList", f.get("Class_List", []))
-    if not isinstance(cl_raw, list):
-        cl_raw = []
-    for cl_entry in cl_raw:
-        sub = gff_struct_fields(cl_entry)
-        cls_id = gff_scalar(sub, "Class")
-        lvl    = gff_scalar(sub, "ClassLevel")
-        if cls_id is not None:
-            classes.append({"class_id": cls_id, "level": lvl})
+    for utc_class in utc.classes:
+        classes.append({
+            "class_id": utc_class.class_id,
+            "level": utc_class.class_level,
+            "powers": list(utc_class.powers),
+        })
 
     # Equipment
-    _EQUIP_SLOTS = {
-        "Equip_ArmorItem": "armor", "Equip_RightHand": "right_hand",
-        "Equip_LeftHand": "left_hand", "Equip_RightRing": "right_ring",
-        "Equip_LeftRing": "left_ring", "Equip_Head": "head",
-        "Equip_Neck": "neck", "Equip_Gloves": "gloves",
-        "Equip_Boots": "boots", "Equip_Belt": "belt",
-        "Equip_Implant": "implant", "Equip_CreatureItem": "creature_item",
-        "Equip_CreatureItem2": "creature_item2", "Equip_CreatureItem3": "creature_item3",
+    equipment: dict = {
+        slot.name.lower(): {
+            "resref": str(item.resref),
+            "droppable": bool(item.droppable),
+            "infinite": bool(item.infinite),
+        }
+        for slot, item in utc.equipment.items()
     }
-    equipment: dict = {}
-    equip_raw = f.get("Equip_ItemList", f.get("ItemList", []))
-    # Some IFOs encode equipment as top-level EquipItemList
-    for gff_key, slot_name in _EQUIP_SLOTS.items():
-        v = gff_scalar(f, gff_key)
-        if v:
-            equipment[slot_name] = str(v)
-    # Also check Equip_ItemList
-    if isinstance(equip_raw, list):
-        for item_entry in equip_raw:
-            sub  = gff_struct_fields(item_entry)
-            repo = gff_scalar(sub, "EquipRes") or gff_scalar(sub, "ResRef") or gff_scalar(sub, "Resref")
-            slot_idx = gff_scalar(sub, "Repos_Posx") or gff_scalar(sub, "Repos_PosY")
-            if repo:
-                equipment[f"slot_{slot_idx}"] = str(repo)
 
     # Feats (FeatList is a GFFList of structs each with a Feat INT16)
-    feats: list = []
-    feat_raw = f.get("FeatList", [])
-    if not isinstance(feat_raw, list):
-        feat_raw = []
-    for fe in feat_raw:
-        sub = fe.get("fields") or fe if isinstance(fe, dict) else {}
-        fid = sub.get("Feat")
-        if isinstance(fid, dict):
-            fid = fid.get("value", fid)
-        if fid is not None:
-            feats.append(int(fid))
+    feats = list(utc.feats)
 
     # Skills (SkillList is a GFFList of structs each with Rank)
     _SKILL_NAMES = [
         "computer_use", "demolitions", "stealth", "awareness",
         "persuade", "repair", "security", "treat_injury",
     ]
-    skills: dict = {}
-    skill_raw = f.get("SkillList", [])
-    if not isinstance(skill_raw, list):
-        skill_raw = []
-    for i, sk in enumerate(skill_raw):
-        sub = sk.get("fields") or sk if isinstance(sk, dict) else {}
-        rank = sub.get("Rank")
-        if isinstance(rank, dict):
-            rank = rank.get("value", rank)
-        if rank is not None:
-            key = _SKILL_NAMES[i] if i < len(_SKILL_NAMES) else f"skill_{i}"
-            skills[key] = int(rank)
+    skills = {name: int(getattr(utc, name)) for name in _SKILL_NAMES}
 
     # Script fields
     scripts: dict = {}
-    for field in (
-        "ScriptSpawn", "ScriptDeath", "ScriptPerceived", "ScriptAttacked",
-        "ScriptDamaged", "ScriptEndCombat", "ScriptHeartbeat", "ScriptOnBlocked",
-        "ScriptUserDefine", "OnSpawn", "OnDeath", "OnPerception", "OnAttacked",
-        "OnDamaged", "OnEndCombatRound", "OnHeartbeat", "OnBlocked", "OnUserDefined",
-    ):
-        v = gff_scalar(f, field)
-        if v:
-            scripts[field] = str(v)
+    for field, attr in {
+        "ScriptSpawn": "on_spawn",
+        "ScriptDeath": "on_death",
+        "ScriptOnNotice": "on_notice",
+        "ScriptAttacked": "on_attacked",
+        "ScriptDamaged": "on_damaged",
+        "ScriptEndRound": "on_end_round",
+        "ScriptHeartbeat": "on_heartbeat",
+        "ScriptOnBlocked": "on_blocked",
+        "ScriptDialogue": "on_dialog",
+        "ScriptEndDialogu": "on_end_dialog",
+        "ScriptDisturbed": "on_disturbed",
+        "ScriptRested": "on_rested",
+        "ScriptSpellAt": "on_spell",
+        "ScriptUserDefine": "on_user_defined",
+    }.items():
+        value = str(getattr(utc, attr))
+        if value:
+            scripts[field] = value
 
     result: dict = {
         "game":         game_id,
         "resref":       resref,
-        "tag":          gff_scalar(f, "Tag"),
+        "tag":          utc.tag,
         "name":         name,
-        "race":         gff_scalar(f, "Race"),
-        "subrace":      gff_scalar(f, "SubraceIndex") or gff_scalar(f, "Subrace"),
-        "gender":       gff_scalar(f, "Gender"),
+        "race":         utc.race_id,
+        "subrace":      utc.subrace_id,
+        "gender":       utc.gender_id,
         "classes":      classes,
-        "str":          gff_scalar(f, "Str"),
-        "dex":          gff_scalar(f, "Dex"),
-        "con":          gff_scalar(f, "Con"),
-        "int_":         gff_scalar(f, "Int"),
-        "wis":          gff_scalar(f, "Wis"),
-        "cha":          gff_scalar(f, "Cha"),
-        "hp":           gff_scalar(f, "CurrentHitPoints") or gff_scalar(f, "HitPoints"),
-        "max_hp":       gff_scalar(f, "MaxHitPoints"),
-        "ac":           gff_scalar(f, "NaturalAC"),
-        "appearance":   gff_scalar(f, "Appearance_Type"),
-        "faction":      gff_scalar(f, "FactionID") or gff_scalar(f, "Faction"),
-        "conversation": gff_scalar(f, "Conversation") or gff_scalar(f, "TemplateResRef"),
+        "str":          utc.strength,
+        "dex":          utc.dexterity,
+        "con":          utc.constitution,
+        "int_":         utc.intelligence,
+        "wis":          utc.wisdom,
+        "cha":          utc.charisma,
+        "hp":           utc.current_hp,
+        "base_hp":      utc.hp,
+        "max_hp":       utc.max_hp,
+        "ac":           utc.natural_ac,
+        "appearance":   utc.appearance_id,
+        "faction":      utc.faction_id,
+        "conversation": str(utc.conversation),
         "equipment":    equipment,
         "feats":        feats,
         "skills":       skills,

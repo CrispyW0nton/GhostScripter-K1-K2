@@ -68,6 +68,7 @@ class MainWindow(QMainWindow):
         self._game_dir: Path | None = None          # KotOR install path
         self._twoda_widget: object | None = None    # TwoDAManagerWidget ref
         self._tlk_widget: object | None = None      # TLKEditorWidget ref
+        self._asset_library_widget: AssetLibraryWidget | None = None
         # Blueprint title format
         self.setWindowTitle(f"GhostScripter — KotOR Script + Logic IDE  v{APP_VERSION}")
 
@@ -1132,8 +1133,10 @@ class MainWindow(QMainWindow):
             w = AssetLibraryWidget(
                 project=self.current_project,
                 game_dir=self._game_dir,
+                target_game=self.game_selector.currentText(),
             )
             w.open_asset_requested.connect(self.open_asset_from_library)
+            self._asset_library_widget = w
             return w
         self._find_or_open_tab("Asset Library", _make)
 
@@ -1320,11 +1323,9 @@ class MainWindow(QMainWindow):
         """
         Decompile raw NCS bytes to NSS source using PyKotor.
 
-        Tries three strategies in order:
-          1. PyKotor NCSDecompiler (full NSS source)
-          2. PyKotor NCSBinaryReader disassembly (low-level but readable)
-          3. Plain hex-dump header + size stub
-        Always returns a non-empty string.
+        Tries source reconstruction first, but returns it only when an exact
+        recompile reproduces the input.  Otherwise it shows authoritative
+        instruction disassembly, then a diagnostic header if parsing fails.
         """
         if not ncs_bytes:
             return f"// {resref}.ncs — empty file\n"
@@ -1335,11 +1336,10 @@ class MainWindow(QMainWindow):
             from pykotor.resource.formats.ncs.decompiler import NCSDecompiler  # type: ignore
             from pykotor.common.misc import Game as PyGame                  # type: ignore
 
-            game_id = "K1"
-            if self._game_dir:
-                # Heuristic: K2 installs usually have "swkotor2" in the path
-                if "swkotor2" in str(self._game_dir).lower() or "kotor2" in str(self._game_dir).lower():
-                    game_id = "K2"
+            game_id = (
+                self.game_selector.currentText()
+                if hasattr(self, "game_selector") else "K1"
+            )
             game_enum = PyGame.K2 if game_id == "K2" else PyGame.K1
 
             ncs_obj = read_ncs(ncs_bytes)
@@ -1348,20 +1348,29 @@ class MainWindow(QMainWindow):
             try:
                 src = NCSDecompiler(ncs_obj, game_enum).decompile()
                 if src and src.strip():
-                    self.log(f"  ✓ Decompiled {resref}.ncs ({len(ncs_bytes):,} bytes → {len(src):,} chars)")
-                    return src
+                    from pykotor.resource.formats.ncs.ncs_auto import bytes_ncs, compile_nss
+                    from ghostscripter.core.nwscript.compiler_defs import install_pykotor_definitions
+                    install_pykotor_definitions(game_id)
+                    rebuilt = bytes(bytes_ncs(compile_nss(src, game_enum)))
+                    if rebuilt == ncs_bytes:
+                        self.log(
+                            f"  ✓ Reconstructed and verified {resref}.ncs "
+                            f"({len(ncs_bytes):,} bytes)"
+                        )
+                        return src
+                    self.log(
+                        f"  ⚠ Reconstructed source for {resref} did not reproduce "
+                        "the original bytes — showing disassembly instead"
+                    )
             except Exception as e:
                 self.log(f"  ⚠ NCSDecompiler failed for {resref}: {e} — trying disassembly")
 
             # Strategy 2 — disassembly
             try:
-                from pykotor.resource.formats.ncs.io_ncs import NCSBinaryReader  # type: ignore
-                reader = NCSBinaryReader(ncs_bytes)
-                ncs_data = reader.load()
                 lines = [f"// {resref}.ncs — disassembly ({len(ncs_bytes):,} bytes)", ""]
-                for i, instr in enumerate(ncs_data.instructions):
+                for i, instr in enumerate(ncs_obj.instructions):
                     lines.append(f"{i:4d}  {instr.ins_type.name:<20} {' '.join(str(a) for a in instr.args)}")
-                self.log(f"  ✓ Disassembled {resref}.ncs ({len(ncs_data.instructions)} instructions)")
+                self.log(f"  ✓ Disassembled {resref}.ncs ({len(ncs_obj.instructions)} instructions)")
                 return "\n".join(lines)
             except Exception as e:
                 self.log(f"  ⚠ NCS disassembly failed for {resref}: {e}")
@@ -1371,7 +1380,7 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.log(f"  ⚠ Decompile error for {resref}: {e}")
 
-        # ── Strategy 3: stub ──────────────────────────────────────────────────
+        # ── Strategy 3: diagnostic only ───────────────────────────────────────
         header = ncs_bytes[:8].hex(" ") if len(ncs_bytes) >= 8 else ncs_bytes.hex(" ")
         return (
             f"// {resref}.ncs — could not decompile\n"
@@ -1621,6 +1630,8 @@ class MainWindow(QMainWindow):
         self.game_status.setText(game)
         if self.current_project:
             self.current_project.target_game = game
+        if self._asset_library_widget is not None:
+            self._asset_library_widget.set_target_game(game)
 
     # ── IPC / GhostRigger ─────────────────────────────────────
 

@@ -63,7 +63,8 @@ class ResourceEntry:
 
     @property
     def filename(self) -> str:
-        ext = RESTYPE_EXT.get(self.restype, f".type{self.restype}")
+        ext = self.restype_str if self.restype_str.startswith(".") else ""
+        ext = ext or RESTYPE_EXT.get(self.restype, f".type{self.restype}")
         return f"{self.resref}{ext}"
 
 
@@ -173,6 +174,9 @@ RESTYPE_EXT: Dict[int, str] = {
 }
 
 EXT_RESTYPE: Dict[str, int] = {v: k for k, v in RESTYPE_EXT.items()}
+# PyKotor exposes both historical spellings for type 2045.  DFT is the
+# canonical display extension, while DTF must remain accepted as an alias.
+EXT_RESTYPE[".dtf"] = 2045
 
 
 # ── KEY / BIF reader ──────────────────────────────────────────
@@ -438,7 +442,7 @@ class ResourceManager:
     """
     Top-level game resource browser.
     Aggregates KEY/BIF files + Override folder from a KotOR installation.
-    Priority: Override files > ERF/MOD files > KEY/BIF archives.
+    Priority: Override files > root resources > ERF/MOD files > KEY/BIF archives.
     """
 
     def __init__(self):
@@ -446,7 +450,22 @@ class ResourceManager:
         self._bifs: Dict[str, BifFile] = {}
         self._erfs: List[ErfReader] = []
         self._rims: List[RimReader] = []
+        # Archive lookup indexes are rebuilt whenever an ERF/MOD/RIM is added.
+        # They preserve the same precedence used by ``read`` while avoiding a
+        # linear scan through every module archive for each resource request.
+        self._archive_by_name: Dict[str, ErfReader | RimReader] = {}
+        self._archive_entries_by_type: Dict[int, List[ResourceEntry]] = {}
+        # Module capsules need a second, contextual index.  Many unrelated
+        # capsules contain a resource literally named ``module.ifo``; a flat
+        # filename lookup cannot distinguish them safely.  Keys are archive
+        # basenames with the retail sidecar suffixes removed (``_s`` and
+        # ``_dlg``), and readers remain in engine precedence order:
+        # MOD replacement, dialogue ERF, then retail RIMs.
+        self._module_archives: Dict[str, List[ErfReader | RimReader]] = {}
         self._override_files: Dict[str, Path] = {}  # filename.lower() -> path
+        # Root-level resource files are separate from Override.  In retail
+        # installs dialog.tlk lives beside chitin.key rather than in a BIF.
+        self._root_files: Dict[str, Path] = {}
         self._game_dir: Path | None = None
         self._loaded = False
         # LRU read cache: filename.lower() → bytes
@@ -467,12 +486,37 @@ class ResourceManager:
 
         Returns False if *game_dir* does not exist.
         """
+        game_dir = Path(game_dir)
         if not game_dir.exists():
             log.warning(f"load_game: path does not exist — {game_dir}")
             return False
 
+        # A ResourceManager instance can be reused for another installation.
+        # Do not retain archives, BIF handles, or cached bytes from the previous
+        # game path.
+        self._key = None
+        self._bifs.clear()
+        self._erfs.clear()
+        self._rims.clear()
+        self._archive_by_name.clear()
+        self._archive_entries_by_type.clear()
+        self._module_archives.clear()
+        self._override_files.clear()
+        self._root_files.clear()
+        self.clear_cache()
+
         key_path = game_dir / "chitin.key"
         self._game_dir = game_dir
+
+        # The game talk table is a live, installation-specific root resource.
+        # Index TLKs case-insensitively so ARE/IFO LocStrings can be resolved
+        # without a bundled or guessed name table.
+        try:
+            for fpath in game_dir.iterdir():
+                if fpath.is_file() and fpath.suffix.casefold() == ".tlk":
+                    self._root_files[fpath.name.casefold()] = fpath
+        except OSError as exc:
+            log.warning("Could not scan root TLK files in %s: %s", game_dir, exc)
 
         if key_path.exists():
             self._key = KeyFile()
@@ -490,7 +534,6 @@ class ResourceManager:
 
         # Always scan the override folder (highest priority, always available)
         override_dir = game_dir / "override"
-        self._override_files.clear()
         if override_dir.exists():
             for fpath in override_dir.iterdir():
                 if fpath.is_file():
@@ -510,6 +553,51 @@ class ResourceManager:
 
         self._loaded = True
 
+        # Load module archives.  Retail K1 stores area data in paired RIMs;
+        # retail K2 additionally stores dialogue in *_dlg.erf archives.  Mods
+        # commonly replace those with .mod (ERF-format) archives.  ERF/MOD
+        # readers are kept ahead of RIM readers, so a .mod replacement wins
+        # over the corresponding retail .rim while Override remains highest.
+        modules_dir = self._find_child_dir(game_dir, "modules")
+        module_archive_count = 0
+        if modules_dir is not None:
+            try:
+                module_paths = sorted(
+                    (
+                        p for p in modules_dir.iterdir()
+                        if p.is_file() and p.suffix.lower() in {".mod", ".erf", ".rim"}
+                    ),
+                    key=lambda p: (
+                        {".mod": 0, ".erf": 1, ".rim": 2}[p.suffix.lower()],
+                        p.name.lower(),
+                    ),
+                )
+            except OSError as exc:
+                log.warning("Could not scan module directory %s: %s", modules_dir, exc)
+                module_paths = []
+
+            for archive_path in module_paths:
+                if archive_path.suffix.lower() == ".rim":
+                    reader = RimReader(archive_path)
+                    if reader.load():
+                        self._rims.append(reader)
+                        self._register_module_archive(archive_path, reader)
+                        module_archive_count += 1
+                else:
+                    reader = ErfReader(archive_path)
+                    if reader.load():
+                        self._erfs.append(reader)
+                        self._register_module_archive(archive_path, reader)
+                        module_archive_count += 1
+
+            if module_archive_count:
+                log.info(
+                    "Module archives loaded: %d (%d ERF/MOD, %d RIM)",
+                    module_archive_count,
+                    len(self._erfs),
+                    len(self._rims),
+                )
+
         # Scan KotOR 2 texture pack ERFs (TexturePacks/swpc_tex_tp[a-d].erf).
         # These contain .tpc textures that are not in chitin.key.
         tex_pack_dir = game_dir / "TexturePacks"
@@ -523,7 +611,179 @@ class ResourceManager:
                         self._erfs.append(reader)
                         log.info(f"Texture pack loaded: {tpa_name} ({len(reader.entries)} entries)")
 
+        self._rebuild_archive_index()
+
         return True  # Always succeed; caller can check is_loaded + has_full_install
+
+    @staticmethod
+    def _find_child_dir(parent: Path, child_name: str) -> Path | None:
+        """Return a direct child directory using a case-insensitive match.
+
+        Windows game installs commonly use ``Modules``/``TexturePacks`` while
+        Linux installs and test fixtures may use lowercase names.  The direct
+        path handles the common case without scanning.
+        """
+        direct = parent / child_name
+        if direct.is_dir():
+            return direct
+        try:
+            wanted = child_name.casefold()
+            return next(
+                (p for p in parent.iterdir() if p.is_dir() and p.name.casefold() == wanted),
+                None,
+            )
+        except OSError:
+            return None
+
+    def _rebuild_archive_index(self) -> None:
+        """Index loaded archives in read-precedence order.
+
+        Explicit/installed ERF and MOD archives precede RIM archives, matching
+        KotOR's use of .mod replacements for retail module RIMs.  Within each
+        group, the first loaded archive wins.  Override is indexed separately
+        and remains the absolute highest-precedence source.
+        """
+        self._archive_by_name.clear()
+        self._archive_entries_by_type.clear()
+
+        for reader in [*self._erfs, *self._rims]:
+            for entry in reader.entries:
+                filename = entry.filename.lower()
+                # Every module capsule uses the same generic ``module.ifo``
+                # filename.  Exposing the first one from a global installation
+                # scan would return unrelated metadata for whichever module was
+                # requested.  Module IFOs require capsule/module context and are
+                # therefore intentionally omitted from the flat global index.
+                if filename == "module.ifo":
+                    continue
+                if filename in self._archive_by_name:
+                    continue
+                self._archive_by_name[filename] = reader
+                self._archive_entries_by_type.setdefault(entry.restype, []).append(entry)
+
+    @staticmethod
+    def _module_id_from_archive_path(archive_path: Path) -> str:
+        """Derive a module id from a live capsule filename.
+
+        KotOR retail modules use ``<id>.rim`` plus ``<id>_s.rim`` and, in
+        K2, commonly ``<id>_dlg.erf``.  A MOD replacement uses
+        ``<id>.mod``.  Only these documented sidecar suffixes are removed;
+        no display-name catalogue or guessed alias is involved.
+        """
+        module_id = archive_path.stem.casefold()
+        for suffix in ("_dlg", "_s"):
+            if module_id.endswith(suffix):
+                module_id = module_id[: -len(suffix)]
+                break
+        return module_id
+
+    def _register_module_archive(
+        self,
+        archive_path: Path,
+        reader: ErfReader | RimReader,
+        *,
+        module_id: str | None = None,
+        prepend: bool = False,
+    ) -> None:
+        """Associate a loaded capsule with its module context."""
+        key = (module_id or self._module_id_from_archive_path(archive_path)).casefold()
+        if not key:
+            return
+        readers = self._module_archives.setdefault(key, [])
+        if reader in readers:
+            return
+        if prepend:
+            readers.insert(0, reader)
+        else:
+            readers.append(reader)
+
+    @property
+    def module_ids(self) -> tuple[str, ...]:
+        """Module ids derived from capsule filenames in the loaded install."""
+        return tuple(sorted(self._module_archives))
+
+    def module_sources(self, module_id: str) -> List[Path]:
+        """Return the live capsule paths associated with *module_id*.
+
+        The order is the same precedence used by :meth:`read_from_module`.
+        An empty list means that no matching capsule was discovered.
+        """
+        key = self._normalize_module_id(module_id)
+        return [reader.path for reader in self._module_archives.get(key, [])]
+
+    @classmethod
+    def _normalize_module_id(cls, module_id: str) -> str:
+        value = Path(str(module_id).strip()).name.casefold()
+        for extension in (".mod", ".rim", ".erf"):
+            if value.endswith(extension):
+                value = value[: -len(extension)]
+                break
+        for suffix in ("_dlg", "_s"):
+            if value.endswith(suffix):
+                value = value[: -len(suffix)]
+                break
+        return value
+
+    def module_ids_for_resource(self, filename: str) -> tuple[str, ...]:
+        """Return every live module capsule containing *filename*.
+
+        This supports area-resref lookups without assuming that an area and
+        its capsule share a name.  Callers must reject or explicitly resolve
+        multiple matches instead of choosing the first archive.
+        """
+        filename_lc = filename.casefold()
+        matches = []
+        for module_id, readers in self._module_archives.items():
+            if any(reader.read(filename_lc) is not None for reader in readers):
+                matches.append(module_id)
+        return tuple(sorted(matches))
+
+    def read_from_module(self, module_id: str, filename: str) -> bytes | None:
+        """Read *filename* using an explicit module capsule context.
+
+        ``module.ifo`` is resolved only from capsules associated with the
+        requested module.  It never falls through to a generic Override or
+        unrelated archive.  Other resources retain normal Override priority,
+        then use only the requested module's capsules, followed by KEY/BIF
+        base-game data when applicable.
+        """
+        key = self._normalize_module_id(module_id)
+        requested = str(filename).strip().casefold()
+        if not key or not requested or "/" in requested or "\\" in requested:
+            return None
+
+        cache_key = f"module:{key}:{requested}"
+        if self._read_cache is not None:
+            cached = self._read_cache.get(cache_key)
+            if cached is not None:
+                return cached
+
+        data: bytes | None = None
+        is_generic_ifo = requested == "module.ifo"
+
+        # A loose generic module.ifo has no trustworthy association with the
+        # requested capsule.  Non-generic resources still honour Override.
+        if not is_generic_ifo:
+            override = self._override_files.get(requested)
+            if override is not None:
+                try:
+                    data = override.read_bytes()
+                except OSError as exc:
+                    log.error("Override read error %s: %s", override, exc)
+
+        if data is None:
+            for reader in self._module_archives.get(key, []):
+                data = reader.read(requested)
+                if data is not None:
+                    break
+
+        # Generic IFOs are meaningful only inside the selected capsule.
+        if data is None and not is_generic_ifo:
+            data = self._read_key_bif(requested)
+
+        if data is not None and self._read_cache is not None:
+            self._read_cache[cache_key] = data
+        return data
 
     @property
     def has_full_install(self) -> bool:
@@ -544,40 +804,116 @@ class ResourceManager:
         restype = EXT_RESTYPE.get(f".{ext_clean}", EXT_RESTYPE.get(ext_clean, -1))
 
         results: List[ResourceEntry] = []
-        seen_resrefs: set = set()
+        seen_filenames: set[str] = set()
 
         # From override files (always highest priority)
         for fname, fpath in self._override_files.items():
             name_ext = fname.rsplit(".", 1)[-1] if "." in fname else ""
             if name_ext == ext_clean:
                 resref = fname[: -(len(ext_clean) + 1)]
-                seen_resrefs.add(resref)
-                results.append(ResourceEntry(
+                entry = ResourceEntry(
                     resref=resref,
-                    restype=restype if restype != -1 else 0,
-                    restype_str=ext_clean,
+                    restype=restype,
+                    restype_str=f".{ext_clean}",
                     source_file=str(fpath),
                     offset=0,
                     size=fpath.stat().st_size,
-                ))
+                )
+                seen_filenames.add(entry.filename.lower())
+                results.append(entry)
+
+        # Root-level resources (notably retail dialog.tlk).
+        for fname, fpath in self._root_files.items():
+            name_ext = fname.rsplit(".", 1)[-1] if "." in fname else ""
+            if name_ext == ext_clean and fname not in seen_filenames:
+                resref = fname[: -(len(ext_clean) + 1)]
+                entry = ResourceEntry(
+                    resref=resref,
+                    restype=restype,
+                    restype_str=f".{ext_clean}",
+                    source_file=str(fpath),
+                    offset=0,
+                    size=fpath.stat().st_size,
+                )
+                seen_filenames.add(entry.filename.lower())
+                results.append(entry)
+
+        # From ERF/MOD/RIM archives.  _archive_entries_by_type is already
+        # de-duplicated in read-precedence order.
+        if restype != -1:
+            for entry in self._archive_entries_by_type.get(restype, []):
+                filename = entry.filename.lower()
+                if filename not in seen_filenames:
+                    seen_filenames.add(filename)
+                    results.append(entry)
 
         # From chitin.key/BIF archives
         if self._key and restype != -1:
             for entry in self._key.by_type(restype):
-                if entry.resref not in seen_resrefs:
+                filename = entry.filename.lower()
+                if filename not in seen_filenames:
+                    seen_filenames.add(filename)
                     results.append(entry)
 
         return results
 
     def search(self, pattern: str) -> List[ResourceEntry]:
-        if not self._key:
-            return []
-        return self._key.search(pattern)
+        """Search every loaded source by resref, honoring read precedence."""
+        pat = pattern.lower()
+        results: List[ResourceEntry] = []
+        seen_filenames: set[str] = set()
+
+        for filename, fpath in self._override_files.items():
+            resref = Path(filename).stem
+            if pat not in resref.lower():
+                continue
+            ext = Path(filename).suffix.lower()
+            restype = EXT_RESTYPE.get(ext, -1)
+            entry = ResourceEntry(
+                resref=resref,
+                restype=restype,
+                restype_str=ext,
+                source_file=str(fpath),
+                size=fpath.stat().st_size,
+            )
+            seen_filenames.add(filename)
+            results.append(entry)
+
+        for filename, fpath in self._root_files.items():
+            resref = Path(filename).stem
+            if filename in seen_filenames or pat not in resref.lower():
+                continue
+            ext = Path(filename).suffix.lower()
+            results.append(ResourceEntry(
+                resref=resref,
+                restype=EXT_RESTYPE.get(ext, -1),
+                restype_str=ext,
+                source_file=str(fpath),
+                size=fpath.stat().st_size,
+            ))
+            seen_filenames.add(filename)
+
+        for restype_entries in self._archive_entries_by_type.values():
+            for entry in restype_entries:
+                filename = entry.filename.lower()
+                if filename in seen_filenames or pat not in entry.resref.lower():
+                    continue
+                seen_filenames.add(filename)
+                results.append(entry)
+
+        if self._key:
+            for entry in self._key.search(pattern):
+                filename = entry.filename.lower()
+                if filename not in seen_filenames:
+                    seen_filenames.add(filename)
+                    results.append(entry)
+
+        return results
 
     def read(self, filename: str) -> bytes | None:
         """
         Read a resource by filename (e.g. 'appearance.2da').
-        Priority: Override > ERF > KEY/BIF
+        Priority: Override > root resources > ERF/MOD/RIM > KEY/BIF
 
         Results are cached in an LRU cache (cachetools) so repeated reads
         of the same resource (e.g. appearance.2da) are served from memory.
@@ -608,19 +944,26 @@ class ResourceManager:
             except Exception as e:
                 log.error(f"Override read error {override}: {e}")
 
-        # 2. ERFs
-        for erf in self._erfs:
-            data = erf.read(filename)
-            if data is not None:
-                return data
+        # 2. Root-level loose resources (dialog.tlk in retail installs)
+        root_file = self._root_files.get(filename.lower())
+        if root_file:
+            try:
+                return root_file.read_bytes()
+            except Exception as e:
+                log.error(f"Root resource read error {root_file}: {e}")
 
-        # 3. RIMs
-        for rim in self._rims:
-            data = rim.read(filename)
+        # 3. ERF/MOD/RIM archives (pre-indexed in precedence order)
+        archive = self._archive_by_name.get(filename.lower())
+        if archive is not None:
+            data = archive.read(filename)
             if data is not None:
                 return data
 
         # 4. KEY/BIF (base game)
+        return self._read_key_bif(filename)
+
+    def _read_key_bif(self, filename: str) -> bytes | None:
+        """Read directly from KEY/BIF, bypassing loose/module archives."""
         if not self._key:
             return None
 
@@ -635,19 +978,30 @@ class ResourceManager:
 
         return self._bifs[bif_path].read_resource(entry.offset)
 
-    def add_erf(self, erf_path: Path) -> bool:
+    def add_erf(self, erf_path: Path, module_id: str | None = None) -> bool:
         """Add an ERF/MOD archive as an override source."""
         reader = ErfReader(erf_path)
         if reader.load():
-            self._erfs.append(reader)
+            self._erfs.insert(0, reader)
+            if module_id is not None or Path(erf_path).suffix.casefold() == ".mod":
+                self._register_module_archive(
+                    Path(erf_path), reader, module_id=module_id, prepend=True,
+                )
+            self._rebuild_archive_index()
+            self.clear_cache()
             return True
         return False
 
-    def add_rim(self, rim_path: Path) -> bool:
+    def add_rim(self, rim_path: Path, module_id: str | None = None) -> bool:
         """Add a RIM archive as a resource source."""
         reader = RimReader(rim_path)
         if reader.load():
-            self._rims.append(reader)
+            self._rims.insert(0, reader)
+            self._register_module_archive(
+                Path(rim_path), reader, module_id=module_id, prepend=True,
+            )
+            self._rebuild_archive_index()
+            self.clear_cache()
             return True
         return False
 

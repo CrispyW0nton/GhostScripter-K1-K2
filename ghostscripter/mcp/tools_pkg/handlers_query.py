@@ -9,8 +9,8 @@ import os
 import re as _re
 
 from ghostscripter.mcp.tools_pkg._helpers import (
-    _2DA_CACHE, _err, _load_rm, _normalize_game, _ok, log,
-    HARDCODED_MODULE_NAMES,
+    _2DA_CACHE, _err, _load_rm, _normalize_game, _ok, _validate_resref, log,
+    gff_locstr, gff_scalar, read_module_resource,
 )
 
 
@@ -32,7 +32,7 @@ async def _compile_summary(args: dict) -> List[types.TextContent]:
 
     # Extract top-level void/int/float/string/object/location/effect/talent functions
     func_pattern = re.compile(
-        r'^(?:void|int|float|string|object|location|effect|talent|itemproperty|action|'
+        r'^(?:void|int|float|string|object|location|effect|talent|action|'
         r'vector|struct\s+\w+)\s+(\w+)\s*\((.*?)\)',
         re.MULTILINE | re.DOTALL,
     )
@@ -80,22 +80,36 @@ async def _compile_summary(args: dict) -> List[types.TextContent]:
                 f"conventionally indicates an object handle — did you mean 'object {m.group(1)}'?"
             )
 
-    # Script ResRef length check (KotOR limit: 16 chars, no extension).
-    # Flag any identifier-like string literal that exceeds 16 chars — KotOR
-    # silently truncates ResRefs passed to engine calls regardless of context,
-    # so we warn on all occurrences rather than trying to infer call sites.
-    resref_pattern = re.compile(r'"([A-Za-z_][A-Za-z0-9_]{16,})"')
+    # Script ResRef length check (KotOR limit: 16 chars, no extension).  Only
+    # inspect arguments whose engine signatures actually take a ResRef; an
+    # arbitrary long string literal may be ordinary text and must not be
+    # reported as if the engine would truncate it.
+    resref_patterns = (
+        re.compile(
+            r'\b(?:ExecuteScript|BeginConversation|StartNewModule|PlayMovie)'
+            r'\s*\(\s*"([A-Za-z_][A-Za-z0-9_]{16,})"'
+        ),
+        re.compile(
+            r'\bActionStartConversation\s*\([^,]+,\s*'
+            r'"([A-Za-z_][A-Za-z0-9_]{16,})"'
+        ),
+        re.compile(
+            r'\bCreateObject\s*\([^,]+,\s*'
+            r'"([A-Za-z_][A-Za-z0-9_]{16,})"'
+        ),
+    )
     for i, line in enumerate(lines, 1):
         # Skip pure comment lines
         stripped_line = line.lstrip()
         if stripped_line.startswith("//"):
             continue
-        for m in resref_pattern.finditer(line):
-            cand = m.group(1)
-            issues.append(
-                f"Line {i}: string literal \"{cand}\" is {len(cand)} chars — "
-                f"KotOR ResRef limit is 16 chars. This will be silently truncated in game."
-            )
+        for pattern in resref_patterns:
+            for m in pattern.finditer(line):
+                cand = m.group(1)
+                issues.append(
+                    f"Line {i}: ResRef argument \"{cand}\" is {len(cand)} chars — "
+                    "KotOR's limit is 16 characters."
+                )
 
     return _ok({
         "filename": filename,
@@ -191,16 +205,50 @@ async def _module_overview(args: dict) -> List[types.TextContent]:
     module_id = (args.get("moduleId") or args.get("module_id") or args.get("module") or args.get("resref") or "").lower().strip()
     if not module_id:
         return _err("moduleOverview: 'moduleId' is required.")
+    validation_error = _validate_resref(module_id, "moduleOverview")
+    if validation_error:
+        return _err(validation_error)
 
     rm = _load_rm(game_id)
+    source_getter = getattr(type(rm), "module_sources", None)
+    if callable(source_getter) and not rm.module_sources(module_id):
+        return _err(
+            f"moduleOverview: no live .mod/.rim/.erf capsule found for '{module_id}'"
+        )
 
-    # Try to read the .git (game instance table) file
-    git_data = rm.read(f"{module_id}.git")
-    are_data = rm.read(f"{module_id}.are")
+    # Resolve the area from this module's own IFO.  A flat read of
+    # ``module.ifo`` would select an arbitrary capsule because every module
+    # uses that same internal filename.
+    area_resref = module_id
+    ifo_data = read_module_resource(rm, module_id, "module.ifo")
+    if ifo_data:
+        try:
+            from ghostscripter.core.services import GFFService
+            ifo = GFFService.parse_bytes(ifo_data)
+            entry_area = (
+                gff_scalar(ifo, "Mod_Entry_Area")
+                or gff_scalar(ifo, "EntryArea")
+            )
+            if entry_area:
+                area_resref = str(entry_area).casefold()
+            else:
+                area_list = ifo.get("Mod_Area_list", [])
+                if isinstance(area_list, list) and area_list:
+                    first = area_list[0]
+                    if isinstance(first, dict):
+                        listed = first.get("Area_Name") or first.get("AreaName")
+                        if listed:
+                            area_resref = str(listed).casefold()
+        except Exception as exc:
+            log.debug("moduleOverview: IFO parse error: %s", exc)
+
+    git_data = read_module_resource(rm, module_id, f"{area_resref}.git")
+    are_data = read_module_resource(rm, module_id, f"{area_resref}.are")
 
     overview: dict = {
         "game": game_id,
         "module_id": module_id,
+        "area_resref": area_resref,
         "area_name": None,
         "creatures": [],
         "doors": [],
@@ -216,20 +264,18 @@ async def _module_overview(args: dict) -> List[types.TextContent]:
         try:
             from ghostscripter.core.services import GFFService
             are = GFFService.parse_bytes(are_data)
-            name_field = are.get("Name") or are.get("AreaName", {})
-            if isinstance(name_field, dict):
-                overview["area_name"] = name_field.get("0", name_field.get("en", ""))
-            elif isinstance(name_field, str):
-                overview["area_name"] = name_field
+            overview["area_name"] = (
+                gff_locstr(are, "Name", rm=rm)
+                or gff_locstr(are, "AreaName", rm=rm)
+            )
         except Exception as _e:
             log.debug("moduleOverview: ARE parse error: %s", _e)
 
-    # Fallback: use HARDCODED_MODULE_NAMES when .are has no readable name
-    if not overview.get("area_name"):
-        overview["area_name"] = HARDCODED_MODULE_NAMES.get(module_id.lower(), None)
-
     if git_data is None:
-        return _ok(dict(overview, error=f"No .git found for module '{module_id}'"))
+        return _ok(dict(
+            overview,
+            error=f"No {area_resref}.git found in module '{module_id}'",
+        ))
 
     try:
         from ghostscripter.core.services import GFFService
@@ -548,7 +594,7 @@ async def _search_all(args: dict) -> List[types.TextContent]:
                     if not data:
                         continue
                     dlg = DialogueService.parse_bytes(data)
-                    d = DialogueService.to_dict(dlg)
+                    d = DialogueService.to_dict(dlg, include_fidelity=False)
                     resref = res_name[:-4]
                     for node_type in ("entries", "replies"):
                         for node in d.get(node_type, []):
@@ -579,9 +625,10 @@ async def _search_all(args: dict) -> List[types.TextContent]:
 async def _read_ssf(args: dict) -> List[types.TextContent]:
     """Read and decode a KotOR Sound Set File (SSF) by resref.
 
-    SSF files are fixed-size binary resources (not GFF).  They contain 28 StrRef
-    integers (4 bytes each) that map creature sound event slots to dialog.tlk entries.
-    Entries whose StrRef is -1 (0xFFFFFFFF) have no sound assigned.
+    The first 28 StrRefs map canonical creature sound-event slots to dialog.tlk
+    entries. Retail files can contain additional undocumented entries, which are
+    returned separately so callers can preserve them. A StrRef of -1
+    (0xFFFFFFFF) means no sound is assigned.
 
     Args:
         game        (str): "K1" or "K2"
@@ -590,21 +637,11 @@ async def _read_ssf(args: dict) -> List[types.TextContent]:
                     include the TLK text alongside the raw StrRef integer.
 
     Returns a dict with keys:
-        game, resref, slot_count (always 28),
-        slots: list of {index, name, strref, text (or null)}
+        game, resref, slot_count (always 28), entry_count,
+        slots: list of {index, name, strref, text (or null)},
+        unknown_slots: list of {index, strref}
     """
-    # Canonical slot names per PyKotor SSFSound enum (ssf_data.py)
-    _SLOT_NAMES = [
-        "BATTLE_CRY_1", "BATTLE_CRY_2", "BATTLE_CRY_3",
-        "BATTLE_CRY_4", "BATTLE_CRY_5", "BATTLE_CRY_6",
-        "SELECT_1", "SELECT_2", "SELECT_3",
-        "ATTACK_GRUNT_1", "ATTACK_GRUNT_2", "ATTACK_GRUNT_3",
-        "PAIN_GRUNT_1", "PAIN_GRUNT_2",
-        "LOW_HEALTH", "DEAD", "CRITICAL_HIT", "TARGET_IMMUNE",
-        "LAY_MINE", "DISARM_MINE", "BEGIN_STEALTH",
-        "BEGIN_SEARCH", "BEGIN_UNLOCK", "UNLOCK_FAILED", "UNLOCK_SUCCESS",
-        "SEPARATED_FROM_PARTY", "REJOINED_PARTY", "POISONED",
-    ]
+    from ghostscripter.core.ssf import SSF_SLOT_NAMES, decode_ssf
 
     try:
         game_id = _normalize_game(args.get("game", "K1"))
@@ -627,22 +664,10 @@ async def _read_ssf(args: dict) -> List[types.TextContent]:
             "Try listResType(type='ssf') to browse available sound sets."
         )
 
-    # SSF binary format: "SSF " (4) + "V1.1" (4) + offset (4) = 12-byte header,
-    # then 28 × INT32 StrRefs at the offset (always 12 in practice).
-    import struct
-    if len(ssf_data) < 12:
-        return _err(f"readSSF: file too short ({len(ssf_data)} bytes), expected at least 40")
-
-    magic = ssf_data[:4]
-    if magic not in (b"SSF ", b"SSF\x00"):
-        return _err(f"readSSF: unexpected magic bytes {magic!r}, expected b'SSF '")
-
     try:
-        data_offset = struct.unpack_from("<I", ssf_data, 8)[0]
-        strref_count = min(28, (len(ssf_data) - data_offset) // 4)
-        strrefs = list(struct.unpack_from(f"<{strref_count}i", ssf_data, data_offset))
-    except struct.error as e:
-        return _err(f"readSSF: parse error — {e}")
+        strrefs = decode_ssf(ssf_data)
+    except (TypeError, ValueError) as e:
+        return _err(f"readSSF: invalid SSF V1.1 resource: {e}")
 
     # Optionally resolve TLK
     tlk = None
@@ -656,7 +681,7 @@ async def _read_ssf(args: dict) -> List[types.TextContent]:
             log.debug("readSSF: TLK load error: %s", _e)
 
     slots: list = []
-    for i, strref in enumerate(strrefs):
+    for i, (name, strref) in enumerate(zip(SSF_SLOT_NAMES, strrefs)):
         text = None
         if tlk is not None and strref >= 0:
             try:
@@ -665,16 +690,23 @@ async def _read_ssf(args: dict) -> List[types.TextContent]:
                 pass
         slots.append({
             "index":  i,
-            "name":   _SLOT_NAMES[i] if i < len(_SLOT_NAMES) else f"SLOT_{i}",
+            "name":   name,
             "strref": strref,
             "text":   text,
         })
+
+    unknown_slots = [
+        {"index": index, "strref": strref}
+        for index, strref in enumerate(strrefs[len(SSF_SLOT_NAMES):], len(SSF_SLOT_NAMES))
+    ]
 
     return _ok({
         "game":       game_id,
         "resref":     resref,
         "slot_count": len(slots),
+        "entry_count": len(strrefs),
         "slots":      slots,
+        "unknown_slots": unknown_slots,
     })
 
 
@@ -685,8 +717,8 @@ async def _read_lip(args: dict) -> List[types.TextContent]:
     duration, 4-byte uint32 keyframe count, then N×5-byte keyframes (float time +
     uint8 shape).
 
-    Mouth shapes: 0=NEUTRAL, 1=EE, 2=EH, 3=AH, 4=OH, 5=OOH, 6=Y, 7=STS,
-                  8=FV, 9=NG, 10=TH, 11=MPB, 12=TD, 13=SH, 14=L, 15=KG
+    Numeric mouth-shape indices are decoded with the retail-validated mapping
+    shared by the editor and writer.  Index 0 is NEUTRAL/rest.
 
     Args:
         game   (str): "K1" or "K2"
@@ -696,11 +728,7 @@ async def _read_lip(args: dict) -> List[types.TextContent]:
         game, resref, duration_s, keyframe_count, keyframes (list of {time_s, shape_index, shape_name})
     """
     import struct
-
-    _SHAPE_NAMES = [
-        "NEUTRAL", "EE", "EH", "AH", "OH", "OOH", "Y", "STS",
-        "FV", "NG", "TH", "MPB", "TD", "SH", "L", "KG",
-    ]
+    from ghostscripter.core.lip import LIP_SHAPES
 
     try:
         game_id = _normalize_game(args.get("game", "K1"))
@@ -748,7 +776,7 @@ async def _read_lip(args: dict) -> List[types.TextContent]:
         keyframes.append({
             "time_s":      round(time_s, 6),
             "shape_index": shape_idx,
-            "shape_name":  _SHAPE_NAMES[shape_idx] if shape_idx < len(_SHAPE_NAMES) else f"SHAPE_{shape_idx}",
+            "shape_name":  LIP_SHAPES[shape_idx] if shape_idx < len(LIP_SHAPES) else f"SHAPE_{shape_idx}",
         })
         offset += 5
 

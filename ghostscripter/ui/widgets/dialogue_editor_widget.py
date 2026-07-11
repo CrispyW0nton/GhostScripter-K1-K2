@@ -1371,6 +1371,7 @@ class NodeInspector(QWidget):
         super().__init__(parent)
         self._node: DialogueNode | None = None
         self._updating = False
+        self._signals_connected = False
         self.setMinimumWidth(260)
         # Debounce inspector saves — coalesces rapid signal bursts (spinner
         # arrow held down, paste into text field, etc.) into one flush.
@@ -1415,6 +1416,12 @@ class NodeInspector(QWidget):
         self.tabs.addTab(self._build_camera_tab(), "Camera")
         self.tabs.addTab(self._build_tsl_tab(), "TSL")
 
+        # All editable controls have now been constructed.  Connecting any
+        # earlier misses widgets on the tabs built later; never connecting at
+        # all leaves the inspector looking functional while edits remain only
+        # on screen.
+        self._connect_all()
+
     # ── Helpers ─────────────────────────────────────────────────
 
     def _scrollable(self, inner: QWidget) -> QScrollArea:
@@ -1426,8 +1433,15 @@ class NodeInspector(QWidget):
         return scroll
 
     def _connect_all(self):
-        """Connect all inputs to _on_changed after filling them."""
+        """Connect every editor input exactly once after all tabs exist."""
+        if self._signals_connected:
+            return
         for w in self.findChildren(QLineEdit):
+            # QSpinBox/QDoubleSpinBox own private QLineEdits.  Their public
+            # valueChanged signals are connected below, so wiring those
+            # private editors too would schedule every change twice.
+            if isinstance(w.parent(), (QSpinBox, QDoubleSpinBox)):
+                continue
             try:
                 w.textChanged.connect(self._on_changed)
             except Exception:
@@ -1457,6 +1471,15 @@ class NodeInspector(QWidget):
                 w.currentIndexChanged.connect(self._on_changed)
             except Exception:
                 pass
+        self.anim_table.itemChanged.connect(self._sync_anims)
+        self.branch_table.itemChanged.connect(self._sync_branches)
+        self.branch_table.itemSelectionChanged.connect(
+            self._on_branch_selection_changed
+        )
+        self.link_comment_input.textChanged.connect(
+            self._sync_selected_branch_comment
+        )
+        self._signals_connected = True
 
     # ── Tab: Basic ──────────────────────────────────────────────
 
@@ -1920,14 +1943,18 @@ class NodeInspector(QWidget):
             color=_GREY
         ))
 
-        self.branch_table = QTableWidget(0, 4)
+        self.branch_table = QTableWidget(0, 5)
         self.branch_table.setHorizontalHeaderLabels(
-            ["Target", "Active Script", "IsChild", "Active2 (TSL)"]
+            [
+                "Target", "Active Script", "IsChild", "Active2 (TSL)",
+                "Display Inactive (TSL)",
+            ]
         )
         self.branch_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
         self.branch_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
         self.branch_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeToContents)
         self.branch_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.Stretch)
+        self.branch_table.horizontalHeader().setSectionResizeMode(4, QHeaderView.ResizeToContents)
         self.branch_table.setStyleSheet(_TABLE_STYLE)
         lay.addWidget(self.branch_table)
 
@@ -1945,6 +1972,10 @@ class NodeInspector(QWidget):
 
         lay.addWidget(_section_lbl("Link comment (editor only)"))
         self.link_comment_input = _make_line_edit("Branch annotation…")
+        self.link_comment_input.setEnabled(False)
+        self.link_comment_input.setToolTip(
+            "Select a branch row to edit its LinkComment field."
+        )
         lay.addWidget(self.link_comment_input)
 
         lay.addStretch()
@@ -2071,6 +2102,10 @@ class NodeInspector(QWidget):
     # ── Load node → populate all fields ─────────────────────────
 
     def load_node(self, node: DialogueNode):
+        # A user can select another node before the 80 ms debounce expires.
+        # Flush the old node first so its final keystroke is not discarded or,
+        # worse, written into the newly selected node.
+        self.flush_pending_changes()
         self._node = node
         self._updating = True
 
@@ -2147,25 +2182,68 @@ class NodeInspector(QWidget):
         self._updating = False
 
     def _load_anim_table(self, anims: List[DLGAnimation]):
-        self.anim_table.setRowCount(0)
-        for a in anims:
-            row = self.anim_table.rowCount()
-            self.anim_table.insertRow(row)
-            self.anim_table.setItem(row, 0, QTableWidgetItem(a.participant))
-            self.anim_table.setItem(row, 1, QTableWidgetItem(str(a.animation_id)))
+        was_blocked = self.anim_table.blockSignals(True)
+        try:
+            self.anim_table.setRowCount(0)
+            for a in anims:
+                row = self.anim_table.rowCount()
+                self.anim_table.insertRow(row)
+                self.anim_table.setItem(row, 0, QTableWidgetItem(a.participant))
+                self.anim_table.setItem(row, 1, QTableWidgetItem(str(a.animation_id)))
+        finally:
+            self.anim_table.blockSignals(was_blocked)
 
     def _load_branch_table(self, branches: List[DialogueBranch]):
-        self.branch_table.setRowCount(0)
-        for b in branches:
-            row = self.branch_table.rowCount()
-            self.branch_table.insertRow(row)
-            target = str(b.target_node_id) if b.target_node_id >= 0 else "END"
-            self.branch_table.setItem(row, 0, QTableWidgetItem(target))
-            self.branch_table.setItem(row, 1, QTableWidgetItem(b.active_script))
-            child_item = QTableWidgetItem("✓" if b.is_child else "")
-            child_item.setTextAlignment(Qt.AlignCenter)
-            self.branch_table.setItem(row, 2, child_item)
-            self.branch_table.setItem(row, 3, QTableWidgetItem(b.active_script2))
+        was_blocked = self.branch_table.blockSignals(True)
+        try:
+            self.branch_table.setRowCount(0)
+            for b in branches:
+                row = self.branch_table.rowCount()
+                self.branch_table.insertRow(row)
+                target = str(b.target_node_id) if b.target_node_id >= 0 else "END"
+                target_item = QTableWidgetItem(target)
+                # Keep the real sentinel alongside the friendly label so END
+                # can never be mistaken for node 0 during synchronization.
+                target_item.setData(Qt.UserRole, b.target_node_id)
+                if b.target_node_id < 0:
+                    target_item.setToolTip(
+                        "End conversation (DLG Index = 0xFFFFFFFF)"
+                    )
+                self.branch_table.setItem(row, 0, target_item)
+                self.branch_table.setItem(
+                    row, 1, QTableWidgetItem(b.active_script)
+                )
+
+                child_item = QTableWidgetItem()
+                child_item.setFlags(
+                    (child_item.flags() | Qt.ItemIsUserCheckable)
+                    & ~Qt.ItemIsEditable
+                )
+                child_item.setCheckState(
+                    Qt.Checked if b.is_child else Qt.Unchecked
+                )
+                child_item.setTextAlignment(Qt.AlignCenter)
+                self.branch_table.setItem(row, 2, child_item)
+                self.branch_table.setItem(
+                    row, 3, QTableWidgetItem(b.active_script2)
+                )
+
+                inactive_item = QTableWidgetItem()
+                inactive_item.setFlags(
+                    (inactive_item.flags() | Qt.ItemIsUserCheckable)
+                    & ~Qt.ItemIsEditable
+                )
+                inactive_item.setCheckState(
+                    Qt.Checked if b.display_inactive else Qt.Unchecked
+                )
+                inactive_item.setTextAlignment(Qt.AlignCenter)
+                self.branch_table.setItem(row, 4, inactive_item)
+
+            if branches:
+                self.branch_table.setCurrentCell(0, 0)
+        finally:
+            self.branch_table.blockSignals(was_blocked)
+        self._on_branch_selection_changed()
 
     # ── On-change → save to node (debounced) ────────────────────
 
@@ -2173,6 +2251,13 @@ class NodeInspector(QWidget):
         """Debounce guard — schedule a flush 80 ms after the last signal."""
         if not self._updating and self._node:
             self._save_timer.start()
+
+    def flush_pending_changes(self):
+        """Synchronously commit a pending debounced edit, if there is one."""
+        if not self._save_timer.isActive():
+            return
+        self._save_timer.stop()
+        self._flush_changes()
 
     def _flush_changes(self):
         """Write all widget values back to the node model (actual work)."""
@@ -2247,10 +2332,14 @@ class NodeInspector(QWidget):
     def _add_anim_row(self):
         if not self._node:
             return
-        row = self.anim_table.rowCount()
-        self.anim_table.insertRow(row)
-        self.anim_table.setItem(row, 0, QTableWidgetItem("PLAYER"))
-        self.anim_table.setItem(row, 1, QTableWidgetItem("0"))
+        was_blocked = self.anim_table.blockSignals(True)
+        try:
+            row = self.anim_table.rowCount()
+            self.anim_table.insertRow(row)
+            self.anim_table.setItem(row, 0, QTableWidgetItem("PLAYER"))
+            self.anim_table.setItem(row, 1, QTableWidgetItem("0"))
+        finally:
+            self.anim_table.blockSignals(was_blocked)
         self._sync_anims()
 
     def _remove_anim_row(self):
@@ -2260,17 +2349,99 @@ class NodeInspector(QWidget):
         self._sync_anims()
 
     def _sync_anims(self):
-        if not self._node:
+        if self._updating or not self._node:
             return
-        anims = []
+        # Mutate imported animation objects in place so their retained typed
+        # GFF data survives an ordinary table edit.
+        anims = self._node.animations
         for r in range(self.anim_table.rowCount()):
             p = (self.anim_table.item(r, 0) or QTableWidgetItem("")).text()
             try:
                 aid = int((self.anim_table.item(r, 1) or QTableWidgetItem("0")).text())
             except ValueError:
                 aid = 0
-            anims.append(DLGAnimation(participant=p, animation_id=aid))
-        self._node.animations = anims
+            if r < len(anims):
+                anims[r].participant = p
+                anims[r].animation_id = aid
+            else:
+                anims.append(DLGAnimation(participant=p, animation_id=aid))
+        del anims[self.anim_table.rowCount():]
+        self.node_changed.emit()
+
+    def _sync_branches(self):
+        """Commit edits made directly in the branch table."""
+        if self._updating or not self._node:
+            return
+        branches = self._node.branches
+        for row in range(min(self.branch_table.rowCount(), len(branches))):
+            branch = branches[row]
+            target_item = self.branch_table.item(row, 0)
+            target_text = (target_item.text() if target_item else "").strip()
+            try:
+                target_id = (
+                    -1 if target_text.upper() == "END" else int(target_text)
+                )
+            except ValueError:
+                # Reject invalid display text and restore the real model value
+                # instead of silently converting it to node zero or END.
+                target_id = branch.target_node_id
+                if target_item is not None:
+                    was_blocked = self.branch_table.blockSignals(True)
+                    try:
+                        target_item.setText(
+                            "END" if target_id < 0 else str(target_id)
+                        )
+                    finally:
+                        self.branch_table.blockSignals(was_blocked)
+            branch.target_node_id = target_id
+            if target_item is not None:
+                was_blocked = self.branch_table.blockSignals(True)
+                try:
+                    target_item.setData(Qt.UserRole, target_id)
+                finally:
+                    self.branch_table.blockSignals(was_blocked)
+            branch.active_script = (
+                self.branch_table.item(row, 1).text()
+                if self.branch_table.item(row, 1) else ""
+            )
+            child_item = self.branch_table.item(row, 2)
+            branch.is_child = bool(
+                child_item and child_item.checkState() == Qt.Checked
+            )
+            branch.active_script2 = (
+                self.branch_table.item(row, 3).text()
+                if self.branch_table.item(row, 3) else ""
+            )
+            inactive_item = self.branch_table.item(row, 4)
+            branch.display_inactive = bool(
+                inactive_item and inactive_item.checkState() == Qt.Checked
+            )
+        self.node_changed.emit()
+
+    def _on_branch_selection_changed(self):
+        """Show the selected branch's LinkComment in its dedicated editor."""
+        row = self.branch_table.currentRow()
+        valid = bool(
+            self._node and 0 <= row < len(self._node.branches)
+        )
+        previous = self._updating
+        self._updating = True
+        try:
+            self.link_comment_input.setEnabled(valid)
+            self.link_comment_input.setText(
+                self._node.branches[row].link_comment if valid else ""
+            )
+        finally:
+            self._updating = previous
+
+    def _sync_selected_branch_comment(self, text: str):
+        """Commit LinkComment to the selected branch immediately."""
+        if self._updating or not self._node:
+            return
+        row = self.branch_table.currentRow()
+        if not 0 <= row < len(self._node.branches):
+            return
+        self._node.branches[row].link_comment = text
         self.node_changed.emit()
 
     def _add_branch(self):
@@ -2522,6 +2693,13 @@ class DialoguePropertiesPanel(QWidget):
         if not self._updating and self._dlg:
             self._save_timer.start()
 
+    def flush_pending_changes(self):
+        """Synchronously commit a pending debounced top-level edit."""
+        if not self._save_timer.isActive():
+            return
+        self._save_timer.stop()
+        self._flush_changes()
+
     def _flush_changes(self):
         """Write all widget values back to the DLG model."""
         if self._updating or not self._dlg:
@@ -2700,6 +2878,8 @@ class DialogueEditorWidget(QWidget):
         lay.addWidget(game_lbl)
         self.game_combo = QComboBox()
         self.game_combo.addItems(["K1", "K2"])
+        if self.dialogue.source_game in {"K1", "K2"}:
+            self.game_combo.setCurrentText(self.dialogue.source_game)
         self.game_combo.setFixedWidth(50)
         self.game_combo.setFixedHeight(22)
         self.game_combo.setStyleSheet(_INPUT_STYLE)
@@ -2857,7 +3037,7 @@ class DialogueEditorWidget(QWidget):
             f"Delete node {node_key} (#{node_id})? All branches targeting it will be removed.",
             QMessageBox.Yes | QMessageBox.No
         ) == QMessageBox.Yes:
-            self.dialogue.remove_node(node_id)
+            self.dialogue.remove_node(node_id, node.node_type)
             self._refresh()
 
     # ── Mode switching ──────────────────────────────────────────
@@ -2940,6 +3120,8 @@ class DialogueEditorWidget(QWidget):
             self.dialogue = new_dlg
             self.scene.dialogue = new_dlg
             self.scene._layout_done = False   # force fresh layout for new file
+            if new_dlg.source_game in {"K1", "K2"}:
+                self.game_combo.setCurrentText(new_dlg.source_game)
             log.debug("_import_dlg: loading into dlg_props panel")
             self.dlg_props.load_dialogue(new_dlg)
 
@@ -2975,6 +3157,11 @@ class DialogueEditorWidget(QWidget):
         if not path:
             return
         try:
+            # A click can arrive before the short UI debounce expires.  Make
+            # the bytes reflect exactly what is still visible in the editor.
+            self.inspector.flush_pending_changes()
+            self._legacy_inspector.flush_pending_changes()
+            self.dlg_props.flush_pending_changes()
             from ghostscripter.core.export.dlg_writer import DLGExporter
             exporter = DLGExporter()
             game = self.game_combo.currentText() if hasattr(self, "game_combo") else "K1"
@@ -3063,7 +3250,7 @@ class DialogueEditorWidget(QWidget):
             "All branches pointing to it will also be removed.",
             QMessageBox.Yes | QMessageBox.No
         ) == QMessageBox.Yes:
-            self.dialogue.remove_node(node.node_id)
+            self.dialogue.remove_node(node.node_id, node.node_type)
             self._refresh()
 
     def _on_node_selected(self, node: "DialogueNode"):

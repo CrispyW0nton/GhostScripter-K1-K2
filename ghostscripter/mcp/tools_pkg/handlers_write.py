@@ -15,24 +15,76 @@ from ghostscripter.mcp.tools_pkg._helpers import (
 
 async def _write_gff(args: dict) -> List[types.TextContent]:
     import base64
-    raw_ft = args.get("fileType") or args.get("file_type") or ""
-    if not raw_ft:
-        return _err("writeGFF: 'fileType' is required (e.g. 'UTC ', 'DLG ', 'JRL ').")
-    file_type = str(raw_ft).ljust(4)[:4]
-    fields = args.get("fields", {})
-    # Validate file_type is a safe 4-char identifier
-    safe_ft = file_type.strip()
-    if not safe_ft or not __import__('re').match(r'^[A-Za-z0-9_ ]{1,4}$', file_type):
-        return _err(f"writeGFF: invalid fileType {file_type!r}. Must be 1-4 alphanumeric chars (e.g. 'UTC ', 'DLG ').")
+    import re
+
+    document = args.get("document")
+    has_legacy_fields = "fields" in args
+    if document is not None and has_legacy_fields:
+        return _err("writeGFF: provide either 'document' or legacy 'fields', not both.")
 
     try:
         from ghostscripter.core.services import GFFService
-        data = GFFService.write(file_type, fields)
-        return _ok({
+
+        if document is not None:
+            if not isinstance(document, dict):
+                return _err("writeGFF: 'document' must be the JSON object returned by readGFF.")
+            data = GFFService.write_typed(document)
+            file_type = str(document.get("file_type", ""))
+
+            # A redundant fileType is accepted only when it agrees, preventing
+            # callers from accidentally relabelling content during a round-trip.
+            raw_ft = args.get("fileType") or args.get("file_type")
+            if raw_ft is not None:
+                requested_type = str(raw_ft).ljust(4)[:4]
+                if requested_type != file_type:
+                    return _err(
+                        "writeGFF: fileType conflicts with the typed document "
+                        f"({requested_type!r} != {file_type!r})."
+                    )
+            fidelity = "lossless_typed"
+            result: dict[str, Any] = {
+                "schema": document.get("schema"),
+                "content": document.get("content"),
+            }
+        else:
+            raw_ft = args.get("fileType") or args.get("file_type") or ""
+            if not raw_ft:
+                return _err(
+                    "writeGFF: pass a typed 'document' from readGFF. "
+                    "Legacy 'fields' also requires fileType and allowLossy=true."
+                )
+            file_type = str(raw_ft).ljust(4)[:4]
+            safe_ft = file_type.strip()
+            if not safe_ft or not re.fullmatch(r"[A-Za-z0-9_ ]{1,4}", file_type):
+                return _err(
+                    f"writeGFF: invalid fileType {file_type!r}. Must be 1-4 "
+                    "alphanumeric characters (e.g. 'UTC ', 'DLG ')."
+                )
+            if not has_legacy_fields or not isinstance(args.get("fields"), dict):
+                return _err("writeGFF: legacy 'fields' must be a JSON object.")
+            allow_lossy = args.get("allowLossy", args.get("allow_lossy", False))
+            if allow_lossy is not True:
+                return _err(
+                    "writeGFF: untyped fields are ambiguous and could corrupt types. "
+                    "Use the typed document returned by readGFF, or explicitly set "
+                    "allowLossy=true only when creating a new legacy file."
+                )
+            data = GFFService.write(file_type, args["fields"], allow_lossy=True)
+            fidelity = "lossy_legacy"
+            result = {
+                "warning": (
+                    "Legacy fields were written with inferred types: string=String, "
+                    "integer=UInt32, float=Single, object=Struct, array=List."
+                )
+            }
+
+        result.update({
             "file_type": file_type,
+            "fidelity": fidelity,
             "size_bytes": len(data),
             "data_base64": base64.b64encode(data).decode("ascii"),
         })
+        return _ok(result)
     except Exception as e:
         return _err(f"GFF write error: {e}")
 
@@ -144,13 +196,17 @@ async def _write_erf(args: dict) -> List[types.TextContent]:
         added: list[str] = []
         valid_files: list[dict] = []
 
-        for entry in files:
-            resref   = str(entry.get("resref", "")).strip()[:16]
+        for index, entry in enumerate(files):
+            resref   = str(entry.get("resref", "")).strip()
             ext      = str(entry.get("type", "")).strip().lstrip(".")
             data_b64 = str(entry.get("data_b64", ""))
             if not resref or not ext or not data_b64:
-                log.debug("writeERF: skipped entry missing resref/type/data_b64: %r", entry)
-                continue
+                return _err(
+                    f"writeERF: files[{index}] requires resref, type, and data_b64."
+                )
+            resref_error = _validate_resref(resref, f"writeERF files[{index}]")
+            if resref_error:
+                return _err(resref_error)
             valid_files.append({"resref": resref, "restype": ext, "data_b64": data_b64})
 
         if not valid_files:
@@ -181,14 +237,13 @@ async def _compile_script(args: dict) -> List[types.TextContent]:
 
     Compilation priority:
       1. PyKotor InbuiltNCSCompiler (Python-native, no Wine, no external binary)
-      2. nwnnsscomp.exe (bundled, native or Wine-wrapped)
+      2. user-installed nwnnsscomp on PATH
 
     The InbuiltNCSCompiler path is always tried first because it works on all platforms
     (Windows/Linux/macOS) without Wine.  It requires PyKotor to be installed.
-    nwnnsscomp is the fallback for environments where PyKotor is not available.
+    nwnnsscomp is only a fallback when a user has installed it independently.
     """
     import base64
-    import platform
     import subprocess
     import sys
     import tempfile
@@ -198,10 +253,13 @@ async def _compile_script(args: dict) -> List[types.TextContent]:
     except ValueError as e:
         return _err(f"compileScript: {e}")
     source: str = args.get("source", "")
-    resref: str = (args.get("resref") or "script").strip()[:16] or "script"
+    resref: str = (args.get("resref") or "script").strip() or "script"
 
     if not source.strip():
         return _err("compileScript: 'source' must not be empty.")
+    resref_error = _validate_resref(resref, "compileScript")
+    if resref_error:
+        return _err(resref_error)
 
     # ── Strategy 1: PyKotor InbuiltNCSCompiler (cross-platform, no Wine) ─────
     # Uses pykotor.resource.formats.ncs.compilers.InbuiltNCSCompiler which wraps
@@ -213,12 +271,15 @@ async def _compile_script(args: dict) -> List[types.TextContent]:
         from pykotor.resource.formats.ncs.ncs_auto import write_ncs  # type: ignore[import]
         from pykotor.common.misc import Game  # type: ignore[import]
         from io import BytesIO
+        from ghostscripter.core.nwscript.compiler_defs import install_pykotor_definitions
+
+        install_pykotor_definitions(game_id)
 
         # Locate nwscript.nss include file bundled with GhostScripter
         if getattr(sys, "frozen", False):
             base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
         else:
-            base = Path(__file__).parent.parent.parent
+            base = Path(__file__).parent.parent.parent.parent
         game_lower = game_id.lower()
         nwscript_path = base / "resources" / "scripts" / game_lower / "nwscript.nss"
 
@@ -273,28 +334,9 @@ async def _compile_script(args: dict) -> List[types.TextContent]:
         })
 
     # ── Strategy 2: nwnnsscomp (bundled .exe, native binary, or Wine) ────────
-    if getattr(sys, "frozen", False):
-        base = Path(sys._MEIPASS)  # type: ignore[attr-defined]
-    else:
-        base = Path(__file__).parent.parent.parent
-    game_lower = game_id.lower()
-    on_windows = platform.system() == "Windows"
-
-    bundled_exe = base / "resources" / "tools" / f"nwnnsscomp_{game_lower}.exe"
-    bundled_generic = base / "resources" / "tools" / "nwnnsscomp.exe"
-
     def _candidates() -> list[list[str]]:
         native = [["nwnnsscomp"], ["nwnnsscomp.exe"]]
-        if on_windows:
-            return [
-                [str(bundled_exe)],
-                [str(bundled_generic)],
-            ] + native
-        else:
-            return native + [
-                ["wine", str(bundled_exe)],
-                ["wine", str(bundled_generic)],
-            ]
+        return native
 
     compiler_cmd: list[str] | None = None
     for cmd in _candidates():
@@ -388,15 +430,19 @@ async def _decompile_script(args: dict) -> List[types.TextContent]:
     except ValueError as e:
         return _err(f"decompileScript: {e}")
 
-    resref: str = (args.get("resref") or "").strip()[:16]
+    resref: str = (args.get("resref") or "").strip()
     data_b64: str = args.get("data_base64") or args.get("data_b64") or ""
+    if resref:
+        resref_error = _validate_resref(resref, "decompileScript")
+        if resref_error:
+            return _err(resref_error)
 
     # ── Resolve NCS bytes ───────────────────────────────────────────────────
     ncs_bytes: bytes | None = None
 
     if data_b64:
         try:
-            ncs_bytes = base64.b64decode(data_b64)
+            ncs_bytes = base64.b64decode(data_b64, validate=True)
         except Exception as decode_err:
             return _err(f"decompileScript: invalid base64 data: {decode_err}")
         used_resref = resref or "inline"
@@ -405,18 +451,9 @@ async def _decompile_script(args: dict) -> List[types.TextContent]:
             rm = _load_rm(game_id)
         except Exception as e:
             return _err(f"decompileScript: could not load installation for {game_id}: {e}")
-        try:
-            from pykotor.resource.type import ResourceType  # type: ignore[import]
-            res = rm.resource(resref, ResourceType.NCS)
-            if res is None:
-                return _err(f"decompileScript: NCS resource '{resref}' not found in {game_id} installation.")
-            ncs_bytes = bytes(res)
-        except ImportError:
-            # Fallback: raw bytes from resource manager without ResourceType enum
-            res = rm.resource(resref, "ncs")  # type: ignore[arg-type]
-            if res is None:
-                return _err(f"decompileScript: NCS resource '{resref}' not found in {game_id} installation.")
-            ncs_bytes = bytes(res)
+        ncs_bytes = rm.read(f"{resref}.ncs")
+        if ncs_bytes is None:
+            return _err(f"decompileScript: NCS resource '{resref}' not found in {game_id} installation.")
         used_resref = resref
     else:
         return _err("decompileScript: provide either 'data_base64' (raw NCS bytes) or 'resref' to look up.")
@@ -437,6 +474,20 @@ async def _decompile_script(args: dict) -> List[types.TextContent]:
         game_enum = PyGame.K1 if game_id == "K1" else PyGame.K2
         ncs_obj = read_ncs(ncs_bytes)
 
+        # Disassembly is the lossless, authoritative representation.  Produce
+        # it even when a higher-level source reconstruction is available.
+        lines = []
+        for index, instr in enumerate(ncs_obj.instructions):
+            args = " ".join(str(arg) for arg in instr.args)
+            jump = ""
+            if instr.jump is not None:
+                target = instr.jump.offset
+                jump = f" -> {target}" if target >= 0 else " -> <target>"
+            lines.append(
+                f"{index:4d}  {instr.ins_type.name:<20} {args}{jump}".rstrip()
+            )
+        disassembly = "\n".join(lines)
+
         # Strategy 1: NCSDecompiler.decompile() — returns NSS source via PyKotor's
         # built-in decompiler (available in pykotor >= 2.3.x, no external deps).
         try:
@@ -446,21 +497,11 @@ async def _decompile_script(args: dict) -> List[types.TextContent]:
         except Exception as decompile_err:
             log.debug("decompileScript: NCSDecompiler.decompile() failed (%s), trying disassembly", decompile_err)
 
-        # Strategy 2: use our own internal NCS instruction reader as disassembly fallback
+        # Strategy 2: return the always-generated instruction listing when
+        # source reconstruction is unavailable.
         if nss_source is None:
-            try:
-                from pykotor.resource.formats.ncs.io_ncs import NCSBinaryReader  # type: ignore[import]
-                from io import BytesIO as _BytesIO
-                reader = NCSBinaryReader(ncs_bytes)
-                ncs_data = reader.load()
-                lines = []
-                for i, instr in enumerate(ncs_data.instructions):
-                    lines.append(f"{i:4d}  {instr.ins_type.name:<20} {' '.join(str(a) for a in instr.args)}")
-                disassembly = "\n".join(lines)
-                nss_source = disassembly
-                method = "PyKotor NCS disassembly"
-            except Exception as disasm_err:
-                log.debug("decompileScript: disassembly fallback failed: %s", disasm_err)
+            nss_source = disassembly
+            method = "PyKotor NCS disassembly"
 
     except ImportError:
         log.debug("decompileScript: PyKotor not available, trying xoreos ncsdecomp")
@@ -499,15 +540,41 @@ async def _decompile_script(args: dict) -> List[types.TextContent]:
     if nss_source is None:
         return _err("decompileScript: all decompilation strategies failed.")
 
+    source_verified = False
+    source_status = "disassembly_only"
+    warning: str | None = None
+    if method != "PyKotor NCS disassembly":
+        try:
+            from pykotor.common.misc import Game as PyGame
+            from pykotor.resource.formats.ncs.ncs_auto import bytes_ncs, compile_nss
+            from ghostscripter.core.nwscript.compiler_defs import install_pykotor_definitions
+
+            install_pykotor_definitions(game_id)
+            game_enum = PyGame.K1 if game_id == "K1" else PyGame.K2
+            rebuilt = bytes(bytes_ncs(compile_nss(nss_source, game_enum)))
+            source_verified = rebuilt == ncs_bytes
+            source_status = "byte_exact_roundtrip" if source_verified else "unverified_reconstruction"
+        except Exception as verify_error:
+            source_status = "unverified_reconstruction"
+            log.debug("decompileScript: candidate verification failed: %s", verify_error)
+        if not source_verified:
+            warning = (
+                "The reconstructed NWScript did not reproduce the original NCS bytes. "
+                "Treat it as a reading aid; use disassembly for authoritative behavior."
+            )
+
     result_dict: dict = {
         "game":        game_id,
         "resref":      used_resref,
         "method":      method,
         "nss_source":  nss_source,
         "size_bytes":  len(ncs_bytes),
+        "source_verified": source_verified,
+        "source_status": source_status,
+        "disassembly": disassembly or "",
     }
-    if disassembly and method != "PyKotor disassemble_ncs":
-        result_dict["disassembly"] = disassembly
+    if warning:
+        result_dict["warning"] = warning
 
     return _ok(result_dict)
 
@@ -521,7 +588,7 @@ async def _write_override(args: dict) -> List[types.TextContent]:
     except ValueError as e:
         return _err(f"writeOverride: {e}")
 
-    resref  = str(args.get("resref", "")).strip()[:16]
+    resref  = str(args.get("resref", "")).strip()
     restype = str(args.get("restype", "")).strip().lstrip(".")
     data_b64 = str(args.get("data_b64", ""))
 
@@ -537,7 +604,7 @@ async def _write_override(args: dict) -> List[types.TextContent]:
         return _err("writeOverride: 'data_b64' is required.")
 
     try:
-        data = base64.b64decode(data_b64)
+        data = base64.b64decode(data_b64, validate=True)
     except Exception as e:
         return _err(f"writeOverride: invalid base64 data: {e}")
 
@@ -611,8 +678,8 @@ async def _write_lip(args: dict) -> List[types.TextContent]:
     Args:
         duration  (float): total audio duration in seconds
         keyframes (list):  ordered list of {time: float, shape: int|str}
-                           shape may be an integer 0-15 or a string name
-                           (NEUTRAL, EE, EH, AH, OH, OOH, Y, STS, FV, NG, TH, MPB, TD, SH, L, KG)
+                           shape may be an integer 0-15, a verified semantic
+                           group name, or an ARPAbet phoneme
 
     Returns a dict with:
         size_bytes, keyframe_count, data (base64 LIP binary)
@@ -620,11 +687,7 @@ async def _write_lip(args: dict) -> List[types.TextContent]:
     import base64
     import struct
 
-    _SHAPE_MAP: dict[str, int] = {
-        "NEUTRAL": 0, "EE": 1, "EH": 2, "AH": 3, "OH": 4, "OOH": 5,
-        "Y": 6, "STS": 7, "FV": 8, "NG": 9, "TH": 10, "MPB": 11,
-        "TD": 12, "SH": 13, "L": 14, "KG": 15,
-    }
+    from ghostscripter.core.lip import LIP_SHAPES, shape_index
 
     duration = args.get("duration")
     if duration is None:
@@ -653,9 +716,9 @@ async def _write_lip(args: dict) -> List[types.TextContent]:
 
         shape_raw = kf.get("shape", 0)
         if isinstance(shape_raw, str):
-            shape_int = _SHAPE_MAP.get(shape_raw.upper())
+            shape_int = shape_index(shape_raw)
             if shape_int is None:
-                valid = ", ".join(_SHAPE_MAP)
+                valid = ", ".join(LIP_SHAPES)
                 return _err(
                     f"writeLIP: keyframe[{idx}] shape '{shape_raw}' not recognised. "
                     f"Valid names: {valid}."
@@ -696,32 +759,44 @@ async def _write_lip(args: dict) -> List[types.TextContent]:
 async def _write_ssf(args: dict) -> List[types.TextContent]:
     """Encode a KotOR SSF (Sound Set File) from a slot→StrRef mapping.
 
-    SSF files map 28 sound-event slots to TLK StrRef integers. This tool
-    takes a dict of slot names (or 0-27 indices) → StrRef values and writes
-    a valid SSF V1.1 binary, returned as base64.
+    The first 28 SSF entries map named sound-event slots to TLK StrRef
+    integers. New files also contain the 12 undocumented compatibility entries
+    used by PyKotor and most retail resources. An ``unknown_slots`` value from
+    readSSF can be supplied when preserving a longer retail table.
 
     SSF V1.1 binary layout (from PyKotor ssf/io_ssf.py):
         Header  : "SSF V1.1" (8 bytes)
         Offset  : uint32 = 12  (offset to sound table)
-        Table   : 28 × int32 StrRefs (-1 = no sound)
+        Table   : at least 28 × uint32 StrRefs (0xFFFFFFFF = no sound)
 
     Canonical slot names (0-27):
-        BATTLE_CRY_1..6, SELECT_1..3, ATTACK_GRUNT_1..3, PAIN_GRUNT_1..3,
-        LOW_HP, DEAD, CRITICAL_HIT, TARGET_IMMUNE, LAY_MINE, DISARM_MINE,
-        BEGIN_STEALTH, BEGIN_SEARCH, BEGIN_UNLOCK, SKILL_IMPEDE, POISONED
+        BATTLE_CRY_1..6, SELECT_1..3, ATTACK_GRUNT_1..3, PAIN_GRUNT_1..2,
+        LOW_HEALTH, DEAD, CRITICAL_HIT, TARGET_IMMUNE, LAY_MINE, DISARM_MINE,
+        BEGIN_STEALTH, BEGIN_SEARCH, BEGIN_UNLOCK, UNLOCK_FAILED,
+        UNLOCK_SUCCESS, SEPARATED_FROM_PARTY, REJOINED_PARTY, POISONED
 
     Args:
         game    (str):  "K1" or "K2"
         resref  (str):  target resref for writeOverride (e.g. "n_bastila")
         slots   (dict): {slot_name_or_index: strref_int, ...}
                         Missing slots default to -1 (no sound).
+        unknown_slots (dict|list): optional readSSF-compatible trailing entries
+                        to preserve. New files default to 12 unset tail entries.
         write_override (bool): if true, also call writeOverride. Default false.
 
     Returns:
-        size_bytes, slot_count, data (base64 SSF binary)
+        size_bytes, slot_count, entry_count, data (base64 SSF binary)
     """
-    import struct
     import base64
+    import json
+
+    from ghostscripter.core.ssf import (
+        SSF_DEFAULT_ENTRY_COUNT,
+        SSF_SLOT_COUNT,
+        SSF_SLOT_NAMES,
+        encode_ssf,
+        validate_strref,
+    )
 
     try:
         game_id = _normalize_game(args.get("game", "K1"))
@@ -737,66 +812,105 @@ async def _write_ssf(args: dict) -> List[types.TextContent]:
     if not isinstance(slots_raw, dict):
         return _err("writeSSF: 'slots' must be a dict of {slot_name_or_index: strref}.")
 
-    # Canonical slot names in order
-    SLOT_NAMES = [
-        "BATTLE_CRY_1", "BATTLE_CRY_2", "BATTLE_CRY_3",
-        "BATTLE_CRY_4", "BATTLE_CRY_5", "BATTLE_CRY_6",
-        "SELECT_1", "SELECT_2", "SELECT_3",
-        "ATTACK_GRUNT_1", "ATTACK_GRUNT_2", "ATTACK_GRUNT_3",
-        "PAIN_GRUNT_1", "PAIN_GRUNT_2", "PAIN_GRUNT_3",
-        "LOW_HP", "DEAD", "CRITICAL_HIT", "TARGET_IMMUNE",
-        "LAY_MINE", "DISARM_MINE", "BEGIN_STEALTH",
-        "BEGIN_SEARCH", "BEGIN_UNLOCK", "SKILL_IMPEDE",
-        "POISONED",
-    ]
-    # Pad to 28 slots with -1
-    strefs: list[int] = [-1] * 28
+    slot_indices = {name: index for index, name in enumerate(SSF_SLOT_NAMES)}
+    strrefs: list[int] = [-1] * SSF_DEFAULT_ENTRY_COUNT
+
+    def _coerce_strref(value: Any, label: str) -> int:
+        if isinstance(value, bool):
+            raise ValueError(f"{label} value must be an integer StrRef")
+        if isinstance(value, float) and not value.is_integer():
+            raise ValueError(f"{label} value must be an integer StrRef")
+        try:
+            parsed = int(value)
+            validate_strref(parsed)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(f"{label} value must be a valid 32-bit StrRef: {exc}") from exc
+        return parsed
 
     for key, val in slots_raw.items():
         try:
-            strref = int(val)
-        except (TypeError, ValueError):
-            return _err(f"writeSSF: slot '{key}' value must be an integer StrRef.")
+            strref = _coerce_strref(val, f"slot '{key}'")
+        except ValueError as exc:
+            return _err(f"writeSSF: {exc}.")
 
-        if isinstance(key, int) or (isinstance(key, str) and key.isdigit()):
+        if isinstance(key, bool):
+            return _err("writeSSF: boolean slot keys are not valid indices.")
+        if isinstance(key, int) or (isinstance(key, str) and key.strip().isdigit()):
             idx = int(key)
         elif isinstance(key, str):
-            key_upper = key.upper()
-            if key_upper in SLOT_NAMES:
-                idx = SLOT_NAMES.index(key_upper)
+            key_upper = key.strip().upper()
+            if key_upper in slot_indices:
+                idx = slot_indices[key_upper]
             else:
                 return _err(f"writeSSF: unknown slot name '{key}'. Use 0-27 or canonical name.")
         else:
             return _err(f"writeSSF: slot key must be int or string, got {type(key).__name__}.")
 
-        if not (0 <= idx <= 27):
+        if not (0 <= idx < SSF_SLOT_COUNT):
             return _err(f"writeSSF: slot index {idx} out of range 0-27.")
-        strefs[idx] = strref
+        strrefs[idx] = strref
 
-    # Build binary
-    buf = bytearray()
-    buf += b"SSF V1.1"
-    buf += struct.pack("<I", 12)  # offset to table
-    for sr in strefs:
-        buf += struct.pack("<i", sr)  # signed int32
+    unknown_raw = args.get("unknown_slots")
+    if unknown_raw is not None:
+        if isinstance(unknown_raw, dict):
+            unknown_items = list(unknown_raw.items())
+        elif isinstance(unknown_raw, list):
+            unknown_items = []
+            for position, item in enumerate(unknown_raw):
+                if not isinstance(item, dict) or "index" not in item or "strref" not in item:
+                    return _err(
+                        "writeSSF: unknown_slots list entries must contain "
+                        f"'index' and 'strref' (invalid entry {position})."
+                    )
+                unknown_items.append((item["index"], item["strref"]))
+        else:
+            return _err("writeSSF: 'unknown_slots' must be an object or readSSF slot list.")
 
-    data_b64 = base64.b64encode(bytes(buf)).decode()
+        for raw_index, raw_strref in unknown_items:
+            if isinstance(raw_index, bool):
+                return _err("writeSSF: boolean unknown-slot indices are invalid.")
+            try:
+                index = int(raw_index)
+            except (TypeError, ValueError):
+                return _err(f"writeSSF: unknown-slot index '{raw_index}' is not an integer.")
+            if index < SSF_SLOT_COUNT:
+                return _err(
+                    f"writeSSF: unknown-slot index {index} overlaps canonical slots 0-27."
+                )
+            if index > 4095:
+                return _err(f"writeSSF: unknown-slot index {index} exceeds safety limit 4095.")
+            try:
+                strref = _coerce_strref(raw_strref, f"unknown slot {index}")
+            except ValueError as exc:
+                return _err(f"writeSSF: {exc}.")
+            if index >= len(strrefs):
+                strrefs.extend([-1] * (index + 1 - len(strrefs)))
+            strrefs[index] = strref
+
+    encoded = encode_ssf(strrefs)
+    data_b64 = base64.b64encode(encoded).decode()
 
     result: dict = {
-        "size_bytes": len(buf),
-        "slot_count": sum(1 for s in strefs if s != -1),
+        "game": game_id,
+        "resref": resref,
+        "size_bytes": len(encoded),
+        "slot_count": SSF_SLOT_COUNT,
+        "assigned_slot_count": sum(1 for s in strrefs[:SSF_SLOT_COUNT] if s != -1),
+        "entry_count": len(strrefs),
         "data": data_b64,
     }
 
     if args.get("write_override", False):
-        from ghostscripter.mcp.tools_pkg.handlers_write import _write_override
         ov_result = await _write_override({
             "game": game_id,
             "resref": resref,
             "restype": "ssf",
-            "data": data_b64,
+            "data_b64": data_b64,
         })
-        result["write_override"] = ov_result
+        try:
+            result["write_override"] = json.loads(ov_result[0].text)
+        except (AttributeError, IndexError, json.JSONDecodeError):
+            result["write_override"] = {"error": "writeOverride returned an invalid response"}
 
     return _ok(result)
 

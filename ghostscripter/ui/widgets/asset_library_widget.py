@@ -19,7 +19,11 @@ from qtpy.QtWidgets import (
     QPlainTextEdit, QProgressBar, QSizePolicy,
 )
 
-from ghostscripter.core.models.script import ScriptFile
+from ghostscripter.core.models.script import (
+    ScriptFile,
+    make_starting_conditional_template,
+    make_void_main_template,
+)
 from ghostscripter.core.models.quest import QuestDefinition
 from ghostscripter.core.models.dialogue import DialogueFile
 
@@ -57,9 +61,11 @@ class AssetLibraryWidget(QWidget):
     # Args: resref (str), ext (str, e.g. '.dlg'), raw_data (bytes or None)
     open_asset_requested = Signal(str, str, object)
 
-    def __init__(self, project=None, parent=None, game_dir=None):
+    def __init__(self, project=None, parent=None, game_dir=None,
+                 target_game: str | None = None):
         super().__init__(parent)
         self.project = project
+        self._target_game = self._normalise_game(target_game)
         # Always store as Path so .exists() calls and Path comparisons work correctly
         self._game_dir: Path | None = Path(game_dir) if game_dir else None
         self._game_assets: dict = {}   # ext -> [filename, ...]
@@ -79,6 +85,23 @@ class AssetLibraryWidget(QWidget):
         self._game_dir = gd
         if gd and gd.exists():
             self._load_game_assets(gd)
+
+    @staticmethod
+    def _normalise_game(game: str | None) -> str:
+        """Return a supported game identifier without inventing a third mode."""
+        return "K2" if str(game).upper() == "K2" else "K1"
+
+    def set_target_game(self, game: str) -> None:
+        """Update the non-project game context supplied by the main window."""
+        self._target_game = self._normalise_game(game)
+
+    def _current_target_game(self) -> str:
+        """Use the live project target when available, otherwise the UI context."""
+        if self.project is not None:
+            project_game = getattr(self.project, "target_game", None)
+            if project_game:
+                return self._normalise_game(project_game)
+        return self._target_game
 
     # ── Game asset loading ────────────────────────────────────
 
@@ -440,7 +463,7 @@ class AssetLibraryWidget(QWidget):
             ("Companion Recruitment Quest", "NPC_COMPANION_QUEST"),
             ("Simple Side Quest", "SIMPLE_QUEST"),
             ("Branching Light/Dark Quest", "BRANCHING_QUEST"),
-            ("Greeting Dialogue (3 nodes)", "dialogue_greeting"),
+            ("Greeting Dialogue (2 nodes)", "dialogue_greeting"),
             ("void main() Script", "script_void_main"),
             ("StartingConditional() Script", "script_conditional"),
         ]
@@ -858,10 +881,15 @@ class AssetLibraryWidget(QWidget):
         name, ok = QInputDialog.getText(self, "New Quest", "Quest name:")
         if ok and name:
             from ghostscripter.core.models.quest import create_quest_from_template
-            quest = create_quest_from_template("SIMPLE_QUEST", name, "K1")
+            quest = create_quest_from_template(
+                "SIMPLE_QUEST", name, self._current_target_game()
+            )
             if self.project:
                 self.project.quests.append(quest)
                 self._populate(self.project)
+                self._set_detail_text(
+                    f"Created {quest.target_game} quest: {quest.quest_name}"
+                )
 
     def _new_dialogue(self):
         name, ok = QInputDialog.getText(self, "New Dialogue", "Dialogue name:")
@@ -1012,9 +1040,65 @@ class AssetLibraryWidget(QWidget):
         if not item:
             return
         key = item.data(Qt.UserRole)
-        QMessageBox.information(self, "Template",
-            f"Template '{key}' selected.\n"
-            "Open the appropriate editor to use it.")
+        if not self.project:
+            QMessageBox.warning(
+                self,
+                "Template",
+                "Open or create a project before using an asset template.",
+            )
+            return
+
+        if key in {"NPC_COMPANION_QUEST", "SIMPLE_QUEST", "BRANCHING_QUEST"}:
+            name, ok = QInputDialog.getText(self, "Quest Template", "Quest name:")
+            if not ok or not name.strip():
+                return
+            from ghostscripter.core.models.quest import create_quest_from_template
+            asset = create_quest_from_template(
+                key, name.strip(), self._current_target_game()
+            )
+            self.project.quests.append(asset)
+            description = f"Created {asset.target_game} quest: {asset.quest_name}"
+        elif key == "dialogue_greeting":
+            name, ok = QInputDialog.getText(
+                self, "Dialogue Template", "Dialogue name (without .dlg):"
+            )
+            if not ok or not name.strip():
+                return
+            from ghostscripter.core.models.dialogue import create_simple_dialogue
+            asset = create_simple_dialogue(name.strip(), "npc_001")
+            self.project.dialogues.append(asset)
+            description = (
+                f"Created dialogue: {asset.name}.dlg "
+                f"({len(asset.entries) + len(asset.replies)} nodes)"
+            )
+        elif key in {"script_void_main", "script_conditional"}:
+            name, ok = QInputDialog.getText(
+                self, "Script Template", "Script name (without .nss):"
+            )
+            if not ok or not name.strip():
+                return
+            script_name = name.strip()
+            if script_name.lower().endswith(".nss"):
+                script_name = script_name[:-4]
+            source = (
+                make_void_main_template()
+                if key == "script_void_main"
+                else make_starting_conditional_template()
+            )
+            asset = ScriptFile(name=script_name, source_code=source)
+            script_dir = getattr(self.project, "script_dir", None)
+            if script_dir:
+                asset.file_path = Path(script_dir) / f"{script_name}.nss"
+            self.project.scripts.append(asset)
+            description = f"Created script: {script_name}.nss"
+        else:
+            QMessageBox.warning(
+                self, "Template", f"Unknown asset template: {key!r}"
+            )
+            return
+
+        self._populate(self.project)
+        self._set_detail_text(description)
 
     def _filter_models(self, text: str):
         """Filter models list by name."""

@@ -8,7 +8,9 @@ from ghostscripter.core.export.gff_writer import (
 from ghostscripter.core.export.erf_writer import (
     OverrideExporter, ERFWriter, ExportEntry, ExportResult, RESTYPE_IDS
 )
-from ghostscripter.core.export.dlg_writer import GFF3Writer as GFFWriter, DLGExporter
+from ghostscripter.core.export.dlg_writer import (
+    GFF3Writer as GFFWriter, DLGExporter, DLGFidelityError,
+)
 from ghostscripter.core.export.dlg_reader import (
     GFF3Reader, DLGImporter, read_dlg, read_dlg_bytes, GFF3ReadError
 )
@@ -24,6 +26,7 @@ __all__ = [
     # DLG
     "GFFWriter",      # alias for GFF3Writer (backwards compat)
     "DLGExporter",
+    "DLGFidelityError",
     "GFF3Reader",
     "DLGImporter",
     "read_dlg",

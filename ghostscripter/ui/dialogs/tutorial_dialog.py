@@ -272,7 +272,7 @@ and/or a <b style='color:{_TEAL}'>Sound Effect</b>.  GhostScripter can
       <code style='color:{_ORANGE}'>scripts/</code> folder</li>
 </ol>
 <p style='color:{_DIM}'>
-  ℹ️ The compiler targets NWScript v1.69 (the KotOR version).
+  ℹ️ The compiler uses the pinned K1/K2 nwscript.nss declarations shipped with GhostScripter.
   Standard bioware include files (nwscript.nss, k_inc_util.nss, etc.)
   are bundled with GhostScripter.
 </p>

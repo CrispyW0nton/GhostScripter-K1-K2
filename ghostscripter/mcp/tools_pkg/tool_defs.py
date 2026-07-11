@@ -115,9 +115,11 @@ TOOLS: List[types.Tool] = [
         name="readGFF",
         description=(
             "Parse any GFF-based KotOR resource (DLG, UTC, UTP, ARE, GIT, JRL, …) "
-            "and return its complete field tree as a JSON object. "
-            "Lists are returned as arrays, structs as nested objects. "
-            "Depth is configurable; defaults to 8."
+            "into GhostScripter's typed, lossless JSON schema. The response preserves "
+            "the exact GFF content tag, version, struct IDs, field order and field "
+            "types, every localized-string variant, vectors, and binary fields. Pass "
+            "the whole response as writeGFF's document to round-trip it. Omitting "
+            "maxDepth returns the complete writable tree."
         ),
         inputSchema={
             "type": "object",
@@ -127,8 +129,12 @@ TOOLS: List[types.Tool] = [
                 "restype": {"type": "string", "description": "Resource type extension (e.g. 'dlg', 'utc', 'are')."},
                 "maxDepth": {
                     "type": "integer",
-                    "default": 8,
-                    "description": "Maximum nesting depth to traverse (default 8; reduces output for deeply nested files).",
+                    "minimum": 1,
+                    "description": (
+                        "Optional preview depth. If supplied and truncation occurs, "
+                        "complete=false and writeGFF will reject the result. Omit for "
+                        "a complete lossless document."
+                    ),
                 },
             },
             "required": ["game", "resref", "restype"],
@@ -140,7 +146,9 @@ TOOLS: List[types.Tool] = [
         description=(
             "Import a KotOR DLG dialogue file and return a structured JSON representation "
             "with entries (NPC lines), replies (player choices), starters, and branch trees. "
-            "Each node includes: text, strref, speaker, scripts, branches, VO resref."
+            "Each node includes: text, strref, speaker, scripts, branches, VO resref. "
+            "The source_fidelity object contains the original typed DLG payload and must be "
+            "kept when passing this response to writeDLG so unsupported stock/K2 fields survive."
         ),
         inputSchema={
             "type": "object",
@@ -284,23 +292,46 @@ TOOLS: List[types.Tool] = [
     types.Tool(
         name="writeGFF",
         description=(
-            "Write a GFF binary file from a JSON field dict. "
-            "The JSON must have the same structure returned by readGFF. "
-            "Returns the GFF bytes as a base64-encoded string and its byte size."
+            "Losslessly write a GFF binary from the complete typed document returned "
+            "by readGFF. Ambiguous untyped fields are rejected by default instead of "
+            "guessing and corrupting UInt/Int/ResRef/LocalizedString types. A legacy "
+            "fields object is available only with fileType plus allowLossy=true and is "
+            "explicitly labelled lossy in the response."
         ),
         inputSchema={
             "type": "object",
             "properties": {
+                "document": {
+                    "type": "object",
+                    "description": (
+                        "Complete ghostscripter.gff.typed.v1 object returned by readGFF. "
+                        "This is the safe, preferred input."
+                    ),
+                },
                 "fileType": {
                     "type": "string",
-                    "description": "4-char GFF file type (e.g. 'DLG ', 'UTC ', 'JRL ', 'UTP ').",
+                    "description": (
+                        "Legacy mode only: 4-char GFF file type (e.g. 'UTC '). "
+                        "When document is supplied, an optional value must agree with it."
+                    ),
                 },
                 "fields": {
                     "type": "object",
-                    "description": "JSON object of field_name -> value (same schema as readGFF output).",
+                    "description": "Legacy ambiguous field_name -> value object; never a readGFF schema.",
+                },
+                "allowLossy": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": (
+                        "Required true to use legacy fields with inferred types. Has no "
+                        "effect on typed documents."
+                    ),
                 },
             },
-            "required": ["fileType", "fields"],
+            "oneOf": [
+                {"required": ["document"]},
+                {"required": ["fileType", "fields", "allowLossy"]},
+            ],
         },
     ),
 
@@ -346,7 +377,9 @@ TOOLS: List[types.Tool] = [
                         "Dialogue structure (same schema as readDLG output). "
                         "Must contain 'entries' and 'replies' arrays, each with 'text', "
                         "'strref', optional 'script1'/'script2', 'vo_resref', etc. "
-                        "Optional top-level fields: 'end_script', 'abort_script'."
+                        "Optional top-level fields: 'end_script', 'abort_script'. When this "
+                        "object came from readDLG, preserve its source_fidelity object exactly; "
+                        "writeDLG refuses a marked imported DTO if that binary payload is missing."
                     ),
                 },
             },
@@ -848,6 +881,13 @@ TOOLS: List[types.Tool] = [
                     "type": "string",
                     "description": "Area resref (max 16 chars), e.g. 'danm13'.",
                 },
+                "module_id": {
+                    "type": "string",
+                    "description": (
+                        "Optional containing module capsule id. Required only when the "
+                        "same area resref occurs in more than one loaded capsule."
+                    ),
+                },
             },
         },
     ),
@@ -982,8 +1022,10 @@ TOOLS: List[types.Tool] = [
                 "game": {"type": "string", "description": "'K1' or 'K2'"},
                 "module_id": {
                     "type": "string",
-                    "description": "Module IFO resref without extension (e.g. 'danm13'). "
-                                   "Use 'module' to read the installation-root module.ifo.",
+                    "description": (
+                        "Module capsule basename without extension (e.g. 'danm13'); "
+                        "module.ifo is read only from that capsule."
+                    ),
                 },
                 "include_git": {
                     "type": "boolean",
@@ -1098,13 +1140,15 @@ TOOLS: List[types.Tool] = [
         name="readSSF",
         description=(
             "Decode a KotOR Sound Set File (SSF) by resref. "
-            "SSF files are 28-slot binary tables that map creature sound events "
+            "The first 28 entries map canonical creature sound events "
             "(BATTLE_CRY_1-6, SELECT_1-3, ATTACK_GRUNT_1-3, PAIN_GRUNT_1-2, "
             "LOW_HEALTH, DEAD, CRITICAL_HIT, TARGET_IMMUNE, LAY_MINE, DISARM_MINE, "
             "BEGIN_STEALTH, BEGIN_SEARCH, BEGIN_UNLOCK, UNLOCK_FAILED, UNLOCK_SUCCESS, "
             "SEPARATED_FROM_PARTY, REJOINED_PARTY, POISONED) "
             "to StrRef integers in dialog.tlk. "
-            "Returns slot list with index, canonical name, strref, and resolved TLK text. "
+            "Retail files may have undocumented trailing entries; these are returned as "
+            "unknown_slots so they can be preserved. Returns each canonical slot's index, "
+            "name, StrRef, and resolved TLK text. "
             "Requires loadInstallation first. "
             "Use listResType(type='ssf') to enumerate sound set resrefs."
         ),
@@ -1133,8 +1177,8 @@ TOOLS: List[types.Tool] = [
             "LIP files are fixed-format binaries (header: 'LIP V1.0', 4-byte float "
             "duration, uint32 keyframe count) followed by 5-byte keyframe entries "
             "(float time + uint8 mouth-shape index 0-15). "
-            "Mouth shapes: 0=NEUTRAL, 1=EE, 2=EH, 3=AH, 4=OH, 5=OOH, "
-            "6=Y, 7=STS, 8=FV, 9=NG, 10=TH, 11=MPB, 12=TD, 13=SH, 14=L, 15=KG. "
+            "Numeric indices 0-15 are decoded with a retail-validated semantic "
+            "mapping (0=NEUTRAL/rest). "
             "Returns duration_s (total audio length), keyframe_count, and a list of "
             "keyframes each with time_s and shape_index + shape_name. "
             "Requires loadInstallation first. "
@@ -1158,8 +1202,7 @@ TOOLS: List[types.Tool] = [
             "Encode and write a KotOR lip-sync animation file (LIP V1.0) from a "
             "keyframe list. Provide the total audio duration in seconds and an ordered "
             "list of keyframes, each with 'time' (float seconds from start) and 'shape' "
-            "(integer 0-15 or string name: NEUTRAL, EE, EH, AH, OH, OOH, Y, STS, FV, "
-            "NG, TH, MPB, TD, SH, L, KG). "
+            "(integer 0-15, verified semantic group name, or ARPAbet phoneme). "
             "Returns base64-encoded LIP binary and keyframe count. "
             "To write the result to disk use writeOverride after decoding. "
             "Keyframes must be in ascending time order; shapes outside 0-15 are rejected."
@@ -1199,9 +1242,8 @@ TOOLS: List[types.Tool] = [
             "Extracts: tag, localized name, race, subrace, gender, class/level pairs, "
             "ability scores (STR/DEX/CON/INT/WIS/CHA), base HP/max HP, AC, "
             "appearance (appearance.2da row), faction, conversation resref, "
-            "equipment list (resrefs by slot), feat list, skill ranks, "
-            "and all script fields (OnSpawn, OnDeath, OnPerception, OnAttacked, "
-            "OnDamaged, OnEndCombatRound, OnHeartbeat, OnBlocked, OnUserDefined). "
+            "typed Equip_ItemList entries by canonical slot, feat list, skill ranks, "
+            "and the real UTC Script* hooks decoded by PyKotor. "
             "Requires loadInstallation first. "
             "Use listResType(type='utc') to enumerate creature blueprint resrefs."
         ),
@@ -1291,13 +1333,14 @@ TOOLS: List[types.Tool] = [
         name="writeSSF",
         description=(
             "Encode a KotOR SSF (Sound Set File) binary from a slot→StrRef mapping. "
-            "SSF files define 28 sound-event slots for creatures "
-            "(BATTLE_CRY_1..6, SELECT_1..3, ATTACK_GRUNT_1..3, PAIN_GRUNT_1..3, "
-            "LOW_HP, DEAD, CRITICAL_HIT, TARGET_IMMUNE, LAY_MINE, DISARM_MINE, "
-            "BEGIN_STEALTH, BEGIN_SEARCH, BEGIN_UNLOCK, SKILL_IMPEDE, POISONED). "
-            "Returns base64-encoded SSF V1.1 binary. Unspecified slots default to "
-            "-1 (no sound). Slot keys can be 0-27 or canonical names. "
-            "Complements readSSF. Requires gsLoadInstallation first."
+            "The 28 canonical slots are BATTLE_CRY_1..6, SELECT_1..3, "
+            "ATTACK_GRUNT_1..3, PAIN_GRUNT_1..2, LOW_HEALTH, DEAD, CRITICAL_HIT, "
+            "TARGET_IMMUNE, LAY_MINE, DISARM_MINE, BEGIN_STEALTH, BEGIN_SEARCH, "
+            "BEGIN_UNLOCK, UNLOCK_FAILED, UNLOCK_SUCCESS, SEPARATED_FROM_PARTY, "
+            "REJOINED_PARTY, and POISONED. Returns base64-encoded SSF V1.1 binary. "
+            "Unspecified slots default to -1 (no sound); new files use the common "
+            "40-entry layout. Slot keys can be 0-27 or canonical names. Pass the "
+            "unknown_slots returned by readSSF to preserve a retail file's trailing entries."
         ),
         inputSchema={
             "type": "object",
@@ -1309,6 +1352,12 @@ TOOLS: List[types.Tool] = [
                     "type": "object",
                     "description": "Dict of {slot_name_or_index: strref_int}. "
                                    "E.g. {\"BATTLE_CRY_1\": 12345, \"0\": 12345}.",
+                },
+                "unknown_slots": {
+                    "description": (
+                        "Optional undocumented entries to preserve, as the readSSF "
+                        "unknown_slots list or an {index: strref} object."
+                    ),
                 },
                 "write_override": {
                     "type": "boolean",
@@ -1407,17 +1456,13 @@ TOOLS: List[types.Tool] = [
     types.Tool(
         name="readSave",
         description=(
-            "Read a KotOR save-game folder and return a structured metadata summary. "
-            "KotOR save games are folder-based: each slot contains SAVENFO.res (GFF), "
-            "savegame.sav (ERF), globalvars.res, partytable.res, and per-module snapshots. "
-            "SAVENFO.res stores: SaveName (localised), LastModule, AreaName, TimePlayed (secs), "
-            "CheatUsed flag, and party table data. "
-            "Returns: game, save_path, save_name, last_module, area_name, time_played_secs, "
-            "cheat_used, party_members (stub list), global_count (stub), "
-            "module_snapshots (list of snapshot module IDs). "
-            "Provide 'save_path' as an absolute OS path to the save slot folder. "
-            "Full party-BIC and globalvars parsing will be added in v3.3 (Phase 1 backlog). "
-            "Does NOT require loadInstallation."
+            "Read a KotOR save slot from its folder and return verified metadata, party state, "
+            "global-variable counts, and cached module IDs. Parses SAVENFO.res, PARTYTABLE.res, "
+            "GLOBALVARS.res, and the resources inside SAVEGAME.sav independently. Genuine zero, "
+            "false, empty-string, and empty-list values are preserved; missing or damaged data is "
+            "returned as null with per-component completeness, warning, and error details. "
+            "Use an absolute save-folder path (no loaded installation required), or a slot name "
+            "relative to the loaded/detected game's saves directory."
         ),
         inputSchema={
             "type": "object",
@@ -1426,7 +1471,10 @@ TOOLS: List[types.Tool] = [
                 "game":      {"type": "string", "description": "'K1' or 'K2'"},
                 "save_path": {
                     "type": "string",
-                    "description": "Absolute OS path to the save-game slot folder (e.g. '/saves/000000 - Taris').",
+                    "description": (
+                        "Absolute path to the save slot folder, or a slot directory name relative "
+                        "to the loaded/detected game's saves folder."
+                    ),
                 },
             },
         },
@@ -1573,15 +1621,13 @@ TOOLS.append(types.Tool(
 TOOLS.append(types.Tool(
     name="decompileScript",
     description=(
-        "Decompile a KotOR NCS binary back to NWScript (.nss) source code. "
+        "Inspect a KotOR NCS binary and attempt to reconstruct NWScript source. "
         "Input can be supplied as base64-encoded NCS bytes (data_base64) "
         "or as a resref to look up from a loaded installation. "
-        "Uses PyKotor's native decompiler (decompile_ncs) first — cross-platform, "
-        "no external tools needed. Falls back to disassembly (disassemble_ncs) "
-        "if full decompilation fails, then tries the xoreos ncsdecomp CLI. "
-        "Returns: nss_source (full source or disassembly), method (which strategy "
-        "succeeded), disassembly (low-level instruction listing when available), "
-        "game, resref, and size_bytes."
+        "Always returns an authoritative low-level disassembly. A reconstructed "
+        "nss_source is explicitly marked source_verified only when recompiling it "
+        "reproduces the original bytes; otherwise it is a non-authoritative reading "
+        "aid with a warning. Falls back to the xoreos ncsdecomp CLI when needed."
     ),
     inputSchema={
         "type": "object",

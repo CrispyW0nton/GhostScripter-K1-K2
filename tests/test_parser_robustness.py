@@ -360,14 +360,12 @@ class TestERFWriterRobustness(unittest.TestCase):
         data = ew.build()
         self.assertIn(name16, _erf_list_resrefs(data))
 
-    def test_resref_over_16_chars_stored_as_max_16(self) -> None:
-        """Names longer than 16 chars are silently truncated — KotOR binary format limit."""
+    def test_resref_over_16_chars_is_rejected(self) -> None:
+        """Names longer than 16 chars must not be silently truncated."""
         long_name = "a" * 24
         ew = self.ERFWriter("ERF ")
-        ew.add_resource(long_name, "ncs", b"data")
-        data = ew.build()
-        names = _erf_list_resrefs(data)
-        self.assertTrue(all(len(n) <= 16 for n in names))
+        with self.assertRaisesRegex(ValueError, "1-16 ASCII"):
+            ew.add_resource(long_name, "ncs", b"data")
 
     def test_build_is_deterministic(self) -> None:
         """Two identical writers produce byte-identical output."""
